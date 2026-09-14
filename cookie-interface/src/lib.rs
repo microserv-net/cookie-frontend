@@ -16,6 +16,7 @@ pub mod animation;
 pub mod api;
 pub mod audio;
 pub mod backend;
+pub mod cli;
 pub mod config;
 pub mod diagnostics;
 pub mod engine;
@@ -26,10 +27,12 @@ pub mod paths;
 #[cfg(feature = "ui")]
 pub mod renderer;
 pub mod retention;
+pub mod setup;
 pub mod sidecar;
 pub mod state;
 pub mod stt;
 pub mod tasks;
+pub mod testmode;
 pub mod tts;
 pub mod util;
 
