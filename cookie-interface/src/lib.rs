@@ -14,6 +14,7 @@
 
 pub mod error;
 pub mod paths;
+pub mod retention;
 pub mod state;
 pub mod util;
 
