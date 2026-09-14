@@ -14,13 +14,16 @@
 
 pub mod audio;
 pub mod config;
+pub mod diagnostics;
 pub mod error;
 pub mod events;
+pub mod intent;
 pub mod paths;
 pub mod retention;
 pub mod sidecar;
 pub mod state;
 pub mod stt;
+pub mod tasks;
 pub mod tts;
 pub mod util;
 
