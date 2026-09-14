@@ -21,6 +21,7 @@ pub mod retention;
 pub mod sidecar;
 pub mod state;
 pub mod stt;
+pub mod tts;
 pub mod util;
 
 pub use config::Config;
