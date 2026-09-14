@@ -23,6 +23,8 @@ pub mod error;
 pub mod events;
 pub mod intent;
 pub mod paths;
+#[cfg(feature = "ui")]
+pub mod renderer;
 pub mod retention;
 pub mod sidecar;
 pub mod state;
