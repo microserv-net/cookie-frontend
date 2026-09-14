@@ -18,7 +18,9 @@ pub mod error;
 pub mod events;
 pub mod paths;
 pub mod retention;
+pub mod sidecar;
 pub mod state;
+pub mod stt;
 pub mod util;
 
 pub use config::Config;
