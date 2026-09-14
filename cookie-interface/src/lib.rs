@@ -12,12 +12,14 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod config;
 pub mod error;
 pub mod paths;
 pub mod retention;
 pub mod state;
 pub mod util;
 
+pub use config::Config;
 pub use error::{Error, Result};
 pub use paths::Paths;
 pub use state::VoiceState;
