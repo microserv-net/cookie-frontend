@@ -133,7 +133,9 @@ cargo fmt
 ```
 
 `cargo test` never requires a microphone, a speaker, a GPU or a downloaded
-model. Hardware is exercised by `--test` and `--doctor`.
+model. Hardware is exercised by `--test` and `--doctor`. More in
+[docs/development.md](docs/development.md); the audio path is explained in
+[docs/audio.md](docs/audio.md).
 
 ## Licence
 
