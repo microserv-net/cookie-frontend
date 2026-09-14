@@ -98,10 +98,10 @@ pub async fn fetch_model(url: &str, target: &Path, expected_sha256: Option<&str>
     #[cfg(not(feature = "http-providers"))]
     {
         let _ = url;
-        return Err(Error::ProviderNotCompiled {
+        Err(Error::ProviderNotCompiled {
             provider: "model download".into(),
             feature: "http-providers",
-        });
+        })
     }
 
     #[cfg(feature = "http-providers")]

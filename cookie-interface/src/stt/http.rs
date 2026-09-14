@@ -205,6 +205,10 @@ mod tests {
             // that merely timed out is not evidence that nothing is there, so
             // `prepare` deliberately declines to call it a failure — a slow
             // server is not a missing one.
+            // clippy sees a constant here; the constant is the platform, and
+            // the point of the assertion is to fail on Unix if the probe ever
+            // stops detecting a refused connection.
+            #[allow(clippy::assertions_on_constants)]
             Ok(()) => assert!(
                 cfg!(windows),
                 "a closed port should have produced a connect error"

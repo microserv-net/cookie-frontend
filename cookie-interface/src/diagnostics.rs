@@ -322,7 +322,7 @@ fn check_storage(paths: &Paths) -> Check {
     }
 }
 
-fn check_input(config: &Config, live: &LiveStatus, probe: bool) -> Check {
+fn check_input(_config: &Config, live: &LiveStatus, probe: bool) -> Check {
     let started = Instant::now();
     if !live.hardware_audio && live.input_device.is_some() {
         return Check::new(
@@ -352,7 +352,6 @@ fn check_input(config: &Config, live: &LiveStatus, probe: bool) -> Check {
                     .input_device
                     .clone()
                     .unwrap_or_else(|| devices[0].clone());
-                let _ = config;
                 return Check::new(
                     "audio.input",
                     "my hearing",
@@ -389,9 +388,8 @@ fn check_input(config: &Config, live: &LiveStatus, probe: bool) -> Check {
     )
 }
 
-fn check_output(config: &Config, live: &LiveStatus, probe: bool) -> Check {
+fn check_output(_config: &Config, live: &LiveStatus, probe: bool) -> Check {
     let started = Instant::now();
-    let _ = config;
     #[cfg(feature = "audio-io")]
     if probe && live.hardware_audio {
         match crate::audio::CpalOutput::list() {

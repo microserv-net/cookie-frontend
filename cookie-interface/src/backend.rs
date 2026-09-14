@@ -47,6 +47,7 @@
 //! on the HTTP API in [`crate::api`].
 
 use serde::Serialize;
+#[cfg(feature = "http-providers")]
 use serde_json::Value;
 
 use crate::config::BackendConfig;
@@ -525,32 +526,59 @@ mod imp {
 
 #[cfg(not(feature = "http-providers"))]
 mod stub {
-    use super::*;
+    use super::{BackendConfig, Command, Result, TurnOptions};
     use tokio::sync::mpsc;
 
     /// Placeholder used when the crate is built without HTTP support.
+    ///
+    /// It has to mirror the real client's signatures exactly, or a build
+    /// without `http-providers` stops compiling the moment the real one
+    /// changes — which is precisely what happened once already. The stub is
+    /// part of the API surface, not a footnote to it.
     #[derive(Debug)]
     pub struct BackendClient;
 
     impl BackendClient {
-        /// Always `None`: without the `http-providers` feature there is no
-        /// way to reach a backend, and pretending otherwise would hide the
-        /// reason speech never gets answered.
+        /// Always `None`: without the `http-providers` feature there is no way
+        /// to reach a backend, and pretending otherwise would hide the reason
+        /// speech never gets answered.
         pub fn from_config(config: &BackendConfig) -> Option<Self> {
             if config.enabled {
                 tracing::warn!(
-                    "backend.enabled is set but this build lacks the `http-providers` feature"
+                    "backend.enabled is set but this build lacks the `http-providers` \
+                     feature, so {} will never be contacted",
+                    config.chat_url()
                 );
             }
             None
         }
 
+        pub fn session_id(&self) -> &str {
+            ""
+        }
+
+        pub async fn health(&self) -> Result<serde_json::Value> {
+            Err(crate::error::Error::ProviderNotCompiled {
+                provider: "backend".into(),
+                feature: "http-providers",
+            })
+        }
+
+        #[allow(clippy::too_many_arguments)]
         pub async fn turn(
             &self,
             _utterance_id: &str,
             _text: &str,
+            _options: TurnOptions,
+            _active_tasks: Vec<String>,
             _commands: mpsc::Sender<Command>,
+            _tasks: std::sync::Arc<crate::tasks::TaskRegistry>,
+            _bus: std::sync::Arc<crate::events::EventBus>,
         ) -> Result<()> {
+            Ok(())
+        }
+
+        pub async fn cancel(&self, _task_id: Option<&str>) -> Result<()> {
             Ok(())
         }
     }
