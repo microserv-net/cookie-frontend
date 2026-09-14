@@ -9,7 +9,7 @@ microphone
 cpal callback  ── real-time context: no allocation, no locks, no I/O
    │  converted to f32 once, here, at the boundary
    ▼
-lock-free SPSC ring        ← the only `unsafe` in the crate
+lock-free SPSC ring        ← atomic slots, no `unsafe`
    │
    ▼
 CaptureHandle.drain()  ── downmix to mono, resample to 16 kHz
@@ -33,7 +33,7 @@ SpeechSynthesizer ─▶ chunks ─▶ speech task
                             ring ─▶ cpal callback ─▶ speaker
 ```
 
-## Why there is `unsafe`
+## Why there is a hand-written ring
 
 The audio callback is a real-time context. It runs on a thread the operating
 system will not wait for, and if it allocates, takes a lock, touches the
@@ -45,10 +45,14 @@ holding the lock while it does something slow. A `tokio::mpsc` is not safe
 there either, because sending can allocate.
 
 So samples cross the boundary through a lock-free single-producer,
-single-consumer ring: two atomics, a preallocated buffer, and about forty
-lines. The soundness argument is written out above the code, the invariants
-are asserted in tests, and it is the only `unsafe` block in the project.
-Everything above the ring is ordinary async Rust.
+single-consumer ring: two cursors, a preallocated buffer of `AtomicU32` slots
+holding `f32` bit patterns, and a consumer that validates after copying that
+the region it read was not overwritten mid-read.
+
+It went through two wrong versions first, both of which looked obviously
+correct — see the module documentation, which records them, because the
+mistakes are easier to repeat than to spot. The current one needs no `unsafe`
+at all; the crate is `#![forbid(unsafe_code)]`.
 
 Overflow drops the oldest samples and increments a counter rather than
 blocking the producer. If the consumer is that far behind, the old audio is

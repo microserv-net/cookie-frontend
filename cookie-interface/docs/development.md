@@ -64,8 +64,9 @@ pass to live here instead.
   guards the speaker for microseconds.
 - Bounded channels everywhere, so an overloaded producer applies backpressure
   instead of growing memory.
-- `unsafe` is confined to `audio/ring.rs`. Adding a second block needs a
-  reason as good as that one's.
+- The crate is `#![forbid(unsafe_code)]`. The audio ring was the one place
+  that ever needed it and no longer does; if you think you need it, the ring's
+  module documentation is the argument to beat.
 - Errors carry a `code()` for machines and a `hint()` for people. If a failure
   has an obvious next step, say it.
 

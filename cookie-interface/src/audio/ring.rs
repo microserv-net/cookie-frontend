@@ -1,6 +1,6 @@
 //! A single-producer / single-consumer lock-free ring buffer of `f32`.
 //!
-//! # Why this file contains the only `unsafe` in the crate
+//! # Why this file exists
 //!
 //! One side of every audio ring is a real-time callback owned by the operating
 //! system's audio thread. That thread must never allocate, never block and
@@ -8,75 +8,84 @@
 //! fails all three tests under load; a channel that allocates per send fails
 //! the first.
 //!
-//! So: a fixed-size buffer, two atomic cursors, acquire/release ordering, and
-//! `UnsafeCell` for the slots. The unsafety is confined to `Producer::push_slice`
-//! and `Consumer::pop_slice`, and is sound because
+//! So: a fixed-size buffer, two atomic cursors, and acquire/release ordering.
 //!
-//! * `Producer` and `Consumer` are not `Clone` and are handed out exactly once,
-//!   so there is precisely one writer and one reader;
-//! * **each cursor has exactly one writer.** The producer owns `write` and
-//!   never stores to `read`; the consumer owns `read` and never stores to
-//!   `write`. Both may *load* the other's cursor. This is the invariant the
-//!   whole file rests on, and violating it is subtle enough to survive code
-//!   review — see the note below.
-//! * the writer publishes with `Release` after writing and the reader acquires
-//!   with `Acquire` before reading, so the data is visible when the cursor is.
+//! # Why there is no `unsafe` here
 //!
-//! # Overflow, and a bug worth remembering
+//! There was, and the history is worth keeping, because both versions looked
+//! obviously correct and both were wrong.
 //!
-//! When the consumer falls behind, the newest audio is worth more than the
-//! oldest, so the producer keeps writing and laps the reader. The reader
-//! notices on its next pop and skips forward.
+//! The first version used `UnsafeCell` slots and had the producer advance the
+//! *read* cursor past samples it was about to overwrite. That gives `read` two
+//! writers: the producer's `fetch_add` races the consumer's `store`, the
+//! cursor moves backwards, and `free()` underflows. CI on macOS failed on its
+//! first run; a single-core machine never reproduced it.
 //!
-//! The obvious implementation of that — have the producer advance `read` past
-//! the samples it is about to overwrite — is wrong, and was what this file did
-//! first. It gives `read` two writers. The producer's `fetch_add` and the
-//! consumer's `store` then race, the cursor goes backwards, `len()` exceeds
-//! the capacity, and `free()` underflows. On a single-core machine the threads
-//! interleave rarely enough that it never showed up; CI on macOS, with real
-//! parallelism, failed on the first run.
+//! The second version gave each cursor exactly one writer — correct, and still
+//! not enough. When the producer is allowed to overwrite, it can write into
+//! the very slots the consumer is *part-way through copying*, so the consumer
+//! returns a mixture of old and new samples. That is an ordering violation in
+//! the output and, in Rust's memory model, a data race regardless of whether
+//! the value is later discarded.
 //!
-//! So the producer does not touch `read` at all. It writes, counts what it
-//! overwrote, and moves on; the consumer resynchronises when it sees that the
-//! distance between the cursors has exceeded what the ring can hold. A skid
-//! guard keeps the reader clear of slots the writer may be part-way through,
-//! because reading a slot while it is being written is a data race even when
-//! the value would be discarded.
+//! Both problems come from the same source: an overwriting producer and a
+//! reading consumer genuinely can touch the same slot at the same time. So the
+//! slots are `AtomicU32` holding `f32` bit patterns, and the consumer
+//! validates after copying that the region it read was not overwritten while
+//! it was reading; if it was, the data is discarded and re-read. Relaxed
+//! atomic loads and stores of `u32` compile to ordinary loads and stores on
+//! every architecture this targets, so the cost is nil and the `unsafe` block
+//! is gone.
 //!
-//! Overflow is counted, never silently ignored: a rising count is the
-//! signature of a stalled consumer and shows up in `--doctor`.
+//! # The invariants
+//!
+//! * `Producer` and `Consumer` are not `Clone` and are handed out exactly
+//!   once, so there is one writer and one reader.
+//! * **Each cursor has exactly one writer.** The producer owns `write`, the
+//!   consumer owns `read`. Both may load the other's.
+//! * The producer publishes with `Release` after filling slots; the consumer
+//!   acquires before reading, so data is visible when the cursor is.
+//! * The consumer never returns samples it cannot prove were intact for the
+//!   whole copy.
+//!
+//! Overflow drops the oldest audio — fresh audio is worth more than stale on a
+//! live microphone — and is counted, never silently ignored. A rising count is
+//! the signature of a stalled consumer and shows up in `--doctor`.
 
-use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
+/// How many times the consumer will re-read a region the producer overwrote
+/// mid-copy before giving up for this call.
+///
+/// Retrying forever would let a fast producer starve the consumer entirely.
+/// Giving up simply means returning nothing this time; the next call
+/// resynchronises and makes progress.
+const MAX_REREADS: usize = 4;
+
 struct Inner {
+    /// `f32` bit patterns. Atomic so that a producer overwriting a slot while
+    /// the consumer reads it is defined behaviour rather than a data race.
+    buffer: Box<[AtomicU32]>,
     /// Capacity is a power of two so wrapping is a mask, not a modulo.
-    buffer: UnsafeCell<Box<[f32]>>,
     mask: usize,
-    /// Index of the next slot the producer will write.
+    /// Next position the producer will write. Producer-owned.
     write: AtomicUsize,
-    /// Index of the next slot the consumer will read.
+    /// Next position the consumer will read. Consumer-owned.
     read: AtomicUsize,
-    /// Samples the producer had to drop because the consumer fell behind.
+    /// Samples overwritten before the consumer could read them.
     dropped: AtomicUsize,
 }
-
-// SAFETY: access to `buffer` is partitioned between exactly one producer and
-// one consumer by the cursor protocol described above.
-unsafe impl Send for Inner {}
-unsafe impl Sync for Inner {}
 
 impl Inner {
     fn capacity(&self) -> usize {
         self.mask + 1
     }
 
-    /// Samples written but not yet read.
+    /// Samples written but not yet read, clamped to the capacity.
     ///
-    /// Clamped to the capacity: once the producer has lapped the consumer the
-    /// true distance is larger than the ring, and every caller wants "how much
-    /// can I actually get", not "how far apart are the cursors".
+    /// Once the producer has lapped the consumer the true distance exceeds the
+    /// ring, and every caller wants "how much can I actually get".
     fn len(&self) -> usize {
         let w = self.write.load(Ordering::Acquire);
         let r = self.read.load(Ordering::Acquire);
@@ -85,25 +94,22 @@ impl Inner {
 
     /// Where the consumer lands after being lapped.
     ///
-    /// Not the full capacity: the producer may be part-way through a push when
-    /// the consumer resynchronises, so the reader stops an eighth of the ring
-    /// short of the write cursor's wrap point. A torn read of a slot is a data
-    /// race even when the sample would have been discarded anyway, and this
-    /// guard band is what makes the overwrite case sound rather than lucky.
-    ///
-    /// Only reached after an overrun, which already means audio was lost.
+    /// Not the full capacity: landing exactly a ring behind the producer means
+    /// the very next push collides again, and the consumer would spend its
+    /// time re-reading. Dropping an extra eighth buys a margin, and only
+    /// applies after an overrun, when audio was being lost anyway.
     fn readable_after_overrun(&self) -> usize {
         let cap = self.capacity();
         cap - cap / 8
     }
 }
 
-/// Producer half. Live on the real-time side.
+/// Producer half. Lives on the real-time side.
 pub struct RingProducer {
     inner: Arc<Inner>,
 }
 
-/// Consumer half. Live on the async side.
+/// Consumer half. Lives on the async side.
 pub struct RingConsumer {
     inner: Arc<Inner>,
 }
@@ -112,8 +118,9 @@ pub struct RingConsumer {
 /// two, minimum 64).
 pub fn ring(capacity: usize) -> (RingProducer, RingConsumer) {
     let cap = capacity.next_power_of_two().max(64);
+    let buffer = (0..cap).map(|_| AtomicU32::new(0)).collect::<Vec<_>>();
     let inner = Arc::new(Inner {
-        buffer: UnsafeCell::new(vec![0.0f32; cap].into_boxed_slice()),
+        buffer: buffer.into_boxed_slice(),
         mask: cap - 1,
         write: AtomicUsize::new(0),
         read: AtomicUsize::new(0),
@@ -151,9 +158,8 @@ impl RingProducer {
 
     /// Append samples. Real-time safe: no allocation, no locks, no syscalls.
     ///
-    /// If `data` does not fit, the oldest samples are discarded to make room —
-    /// for a live microphone, fresh audio is worth more than stale audio.
-    /// Returns the number of samples that had to be dropped.
+    /// If they do not fit, the oldest unread audio is overwritten. Returns how
+    /// many samples that cost.
     pub fn push_slice(&mut self, data: &[f32]) -> usize {
         if data.is_empty() {
             return 0;
@@ -166,24 +172,20 @@ impl RingProducer {
             data
         };
 
-        // Count what this write will overwrite, but do not touch `read`:
-        // that cursor belongs to the consumer, which resynchronises itself.
+        // Count what will be overwritten, but never touch `read`: that cursor
+        // belongs to the consumer, which notices and resynchronises itself.
         let dropped = data.len().saturating_sub(self.free());
         if dropped > 0 {
             self.inner.dropped.fetch_add(dropped, Ordering::Relaxed);
         }
 
-        // Relaxed is enough: this is the only thread that stores to `write`.
+        // Relaxed: this is the only thread that stores to `write`.
         let write = self.inner.write.load(Ordering::Relaxed);
-        // SAFETY: single producer; we only touch slots in the free region.
-        let buf = unsafe { &mut *self.inner.buffer.get() };
-        let start = write & self.inner.mask;
-        let first = (cap - start).min(data.len());
-        buf[start..start + first].copy_from_slice(&data[..first]);
-        if first < data.len() {
-            let rest = data.len() - first;
-            buf[..rest].copy_from_slice(&data[first..]);
+        for (i, sample) in data.iter().enumerate() {
+            let slot = write.wrapping_add(i) & self.inner.mask;
+            self.inner.buffer[slot].store(sample.to_bits(), Ordering::Relaxed);
         }
+        // Release: publishes every slot store above to whoever acquires this.
         self.inner
             .write
             .store(write.wrapping_add(data.len()), Ordering::Release);
@@ -210,50 +212,34 @@ impl RingConsumer {
 
     /// Fill `out` with up to `out.len()` samples. Returns how many were read.
     ///
-    /// If the producer has lapped us since the last call, the lost samples are
-    /// skipped here rather than returned as garbage: stale audio that has been
-    /// partially overwritten is worse than no audio.
+    /// Samples the producer overwrote before we reached them are skipped
+    /// rather than returned: partially overwritten audio is worse than none.
+    /// What is returned is always contiguous and in order.
     pub fn pop_slice(&mut self, out: &mut [f32]) -> usize {
-        let read = self.resynchronise();
-        let available = self.len().min(out.len());
-        if available == 0 {
-            return 0;
+        for _ in 0..MAX_REREADS {
+            let read = self.resynchronise();
+            let available = self.len().min(out.len());
+            if available == 0 {
+                return 0;
+            }
+            for (i, slot) in out[..available].iter_mut().enumerate() {
+                let index = read.wrapping_add(i) & self.inner.mask;
+                *slot = f32::from_bits(self.inner.buffer[index].load(Ordering::Relaxed));
+            }
+            // Did the producer wrap into the region we just copied? If so the
+            // samples are a mixture of old and new, so throw them away and try
+            // again rather than handing back audio that goes backwards.
+            if self.overwritten_since(read) {
+                continue;
+            }
+            self.inner
+                .read
+                .store(read.wrapping_add(available), Ordering::Release);
+            return available;
         }
-        // SAFETY: single consumer; we only touch slots in the filled region,
-        // published by the producer's Release store.
-        let buf = unsafe { &*self.inner.buffer.get() };
-        let start = read & self.inner.mask;
-        let cap = self.inner.capacity();
-        let first = (cap - start).min(available);
-        out[..first].copy_from_slice(&buf[start..start + first]);
-        if first < available {
-            let rest = available - first;
-            out[first..available].copy_from_slice(&buf[..rest]);
-        }
-        self.inner
-            .read
-            .store(read.wrapping_add(available), Ordering::Release);
-        available
-    }
-
-    /// Catch up if the producer has overwritten unread samples.
-    ///
-    /// Returns the (possibly advanced) read cursor. Only the consumer calls
-    /// this, which is what keeps `read` single-writer.
-    fn resynchronise(&mut self) -> usize {
-        let write = self.inner.write.load(Ordering::Acquire);
-        let read = self.inner.read.load(Ordering::Relaxed);
-        let distance = write.wrapping_sub(read);
-        if distance <= self.inner.capacity() {
-            return read;
-        }
-        // The producer has lapped us: some of what we have not read has
-        // already been overwritten. Jump to the oldest sample still
-        // guaranteed intact.
-        let skipped = distance - self.inner.readable_after_overrun();
-        let read = read.wrapping_add(skipped);
-        self.inner.read.store(read, Ordering::Release);
-        read
+        // A producer this far ahead of us means the machine is in trouble;
+        // returning nothing lets the caller try again rather than spin here.
+        0
     }
 
     /// Read exactly `out.len()` samples, or nothing at all. Useful for
@@ -276,6 +262,29 @@ impl RingConsumer {
             .read
             .store(read.wrapping_add(n), Ordering::Release);
         n
+    }
+
+    /// Catch up if the producer has overwritten unread samples.
+    ///
+    /// Returns the (possibly advanced) read cursor. Only the consumer calls
+    /// this, which is what keeps `read` single-writer.
+    fn resynchronise(&mut self) -> usize {
+        let read = self.inner.read.load(Ordering::Relaxed);
+        if !self.overwritten_since(read) {
+            return read;
+        }
+        let write = self.inner.write.load(Ordering::Acquire);
+        let skipped = write.wrapping_sub(read) - self.inner.readable_after_overrun();
+        let read = read.wrapping_add(skipped);
+        self.inner.read.store(read, Ordering::Release);
+        read
+    }
+
+    /// True when the producer has moved more than a full ring past `read`,
+    /// meaning some unread samples no longer exist.
+    fn overwritten_since(&self, read: usize) -> bool {
+        let write = self.inner.write.load(Ordering::Acquire);
+        write.wrapping_sub(read) > self.inner.capacity()
     }
 }
 

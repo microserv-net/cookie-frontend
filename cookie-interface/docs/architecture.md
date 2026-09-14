@@ -61,10 +61,11 @@ Different data wants different delivery:
 ## Real-time discipline
 
 The audio callbacks allocate nothing, lock nothing, and touch neither the
-filesystem nor the network. They move samples through a lock-free SPSC ring —
-the crate's only `unsafe`, about forty lines, with the soundness argument
-written out above it. Downmixing, resampling and analysis all happen on the
-async side of that ring.
+filesystem nor the network. They move samples through a lock-free SPSC ring
+whose slots are `AtomicU32` holding `f32` bit patterns, so a producer
+overwriting a slot while the consumer reads it is defined rather than a data
+race. The crate is `#![forbid(unsafe_code)]`. Downmixing, resampling and
+analysis all happen on the async side of that ring.
 
 Device formats (i16, u16, i32, f64…) are converted exactly once, at the device
 boundary. Above it everything is f32 mono at one rate, which removes a whole

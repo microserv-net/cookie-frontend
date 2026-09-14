@@ -10,7 +10,10 @@
 //! a face; the mind lives in a separate process (the Cookie *backend*) and
 //! talks to this one over HTTP.
 
-#![forbid(unsafe_op_in_unsafe_fn)]
+// The lock-free audio ring was the only thing that ever needed `unsafe`, and
+// it no longer does — the slots are atomics, which is both sound and free on
+// every architecture this targets. Forbidding it outright keeps that true.
+#![forbid(unsafe_code)]
 
 pub mod animation;
 pub mod api;
