@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod animation;
 pub mod api;
 pub mod audio;
 pub mod backend;
