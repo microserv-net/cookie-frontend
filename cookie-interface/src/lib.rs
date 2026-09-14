@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+pub mod audio;
 pub mod config;
 pub mod error;
 pub mod paths;
