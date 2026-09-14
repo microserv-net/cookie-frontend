@@ -1,0 +1,102 @@
+[package]
+name = "cookie-interface"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Voice interface front-end for the Cookie assistant: microphone, VAD, STT, TTS, a local streaming HTTP API and an audio-reactive procedural orb."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://example.invalid/cookie-interface"
+keywords = ["voice", "tts", "stt", "audio", "wgpu"]
+categories = ["multimedia::audio", "gui"]
+
+[lib]
+name = "cookie_interface"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cookie-interface"
+path = "src/main.rs"
+
+[features]
+# The default build gives you: the orb renderer, the local HTTP API,
+# cpal audio I/O, the built-in VAD, the sidecar + HTTP model providers and
+# the OS speech synthesiser. No model download is needed to *build*.
+default = ["ui", "audio-io", "http-providers"]
+
+# Procedural orb renderer (wgpu + winit). Disable for headless/server builds
+# and for CI: `cargo test --no-default-features --features audio-io`.
+ui = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:bytemuck", "dep:raw-window-handle"]
+
+# Real microphone / speaker I/O through cpal. Without it the engine still
+# runs against the in-process mock devices (used by the test-suite).
+audio-io = ["dep:cpal"]
+
+# Network model providers (OpenAI-compatible STT, Qwen3-TTS / Kokoro HTTP)
+# and the first-run model downloader. Plain HTTP only, which is all a
+# localhost model server needs and keeps the build free of a TLS stack.
+http-providers = ["dep:reqwest"]
+
+# Adds rustls to the HTTP providers so `https://` endpoints (hosted
+# Qwen3-TTS, hosted Whisper) can be reached. Costs a C toolchain at build
+# time, which is why it is opt-in. See docs/installation.md.
+tls = ["http-providers", "reqwest?/rustls", "reqwest?/webpki-roots"]
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+    "process",
+    "signal",
+    "net",
+] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+hound = "3"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+base64 = "0.22"
+
+cpal = { version = "0.18", optional = true }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "stream",
+    "http2",
+    "multipart",
+], optional = true }
+
+wgpu = { version = "30", optional = true }
+winit = { version = "0.30", optional = true }
+pollster = { version = "1", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tempfile = "3"
+axum-test = "18"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# The renderer is unusably slow in a debug build; always optimise the
+# shader/maths heavy crates even in `cargo run`.
+[profile.dev.package."*"]
+opt-level = 2
