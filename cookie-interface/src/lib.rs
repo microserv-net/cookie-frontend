@@ -16,6 +16,7 @@ pub mod audio;
 pub mod backend;
 pub mod config;
 pub mod diagnostics;
+pub mod engine;
 pub mod error;
 pub mod events;
 pub mod intent;
