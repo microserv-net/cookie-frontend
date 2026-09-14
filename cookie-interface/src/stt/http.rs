@@ -196,10 +196,19 @@ mod tests {
     #[tokio::test]
     async fn unreachable_endpoint_is_reported_as_model_unavailable() {
         let mut c = cfg();
-        // Port 1 is reliably closed and refuses fast.
         c.endpoint = "http://127.0.0.1:1/v1/audio/transcriptions".into();
         let r = HttpRecognizer::from_config(&c).unwrap();
-        let err = r.prepare().await.unwrap_err();
-        assert_eq!(err.code(), "model_unavailable");
+        match r.prepare().await {
+            Err(e) => assert_eq!(e.code(), "model_unavailable"),
+            // Unix refuses a connection to a closed local port immediately;
+            // Windows lets it hang until our probe deadline instead. A probe
+            // that merely timed out is not evidence that nothing is there, so
+            // `prepare` deliberately declines to call it a failure — a slow
+            // server is not a missing one.
+            Ok(()) => assert!(
+                cfg!(windows),
+                "a closed port should have produced a connect error"
+            ),
+        }
     }
 }
