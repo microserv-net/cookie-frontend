@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
+use winit::dpi::{LogicalPosition, LogicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
@@ -130,8 +130,11 @@ struct OrbApp {
     last_frame: Instant,
     last_present: Instant,
     presence: Presence,
+    /// Last known pointer position, kept only as a fallback for platforms
+    /// where the system query fails (some Wayland compositors).
     cursor: Option<LogicalPosition<f64>>,
     smoothed_cursor: Option<LogicalPosition<f64>>,
+    scale_factor: f64,
     focused: bool,
     /// Set once the GPU is up, so diagnostics can report the truth about
     /// whether Cookie actually has a face on this machine.
@@ -160,6 +163,7 @@ impl OrbApp {
             last_present: Instant::now(),
             cursor: None,
             smoothed_cursor: None,
+            scale_factor: 1.0,
             focused: false,
             reported: false,
             degraded_reason: None,
@@ -191,6 +195,25 @@ impl OrbApp {
         attributes
     }
 
+    /// Where the pointer is, in logical screen coordinates.
+    ///
+    /// Queried from the windowing system rather than accumulated from motion
+    /// events. winit reports motion relative to a window, so accumulating
+    /// deltas drifted, needed an arbitrary origin, and stopped entirely while
+    /// the pointer was over another application — which is where it spends
+    /// almost all of its time. Asking the system costs a microsecond and is
+    /// always right.
+    fn pointer(&self) -> Option<LogicalPosition<f64>> {
+        use mouse_position::mouse_position::Mouse;
+        match Mouse::get_mouse_position() {
+            Mouse::Position { x, y } => Some(LogicalPosition::new(
+                x as f64 / self.scale_factor,
+                y as f64 / self.scale_factor,
+            )),
+            Mouse::Error => None,
+        }
+    }
+
     /// Where the orb should sit this frame, in logical screen coordinates.
     fn desired_position(&mut self, dt: f32) -> Option<LogicalPosition<f64>> {
         if !matches!(
@@ -199,11 +222,17 @@ impl OrbApp {
         ) {
             return None;
         }
-        let cursor = self.cursor?;
+        let cursor = self.pointer().or(self.cursor)?;
+        // Centre the orb on the offset point. A window is positioned by its
+        // top-left corner, so without this it sits up and to the left of
+        // where it was asked to go — which is what made it look like it was
+        // floating away from the pointer.
+        let half_width = self.config.ui.width as f64 / 2.0;
+        let half_height = self.config.ui.height as f64 / 2.0;
         let lag = self.config.ui.cursor_follow_lag;
         let target = LogicalPosition::new(
-            cursor.x + self.config.ui.cursor_offset[0] as f64,
-            cursor.y + self.config.ui.cursor_offset[1] as f64,
+            cursor.x + self.config.ui.cursor_offset[0] as f64 - half_width,
+            cursor.y + self.config.ui.cursor_offset[1] as f64 - half_height,
         );
         if lag <= 0.0 {
             self.smoothed_cursor = Some(target);
@@ -306,6 +335,7 @@ impl ApplicationHandler for OrbApp {
                 tracing::info!("this platform kept the orb clickable: {e}");
             }
         }
+        self.scale_factor = window.scale_factor();
         window.set_visible(self.presence.current > 0.0);
 
         match pollster::block_on(GpuState::new(window.clone(), &self.config)) {
@@ -340,6 +370,16 @@ impl ApplicationHandler for OrbApp {
                 }
             }
             WindowEvent::Focused(focused) => self.focused = focused,
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.scale_factor = scale_factor;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                // Only fires when the pointer is over our own window, which
+                // is rare for a click-through orb — but it costs nothing and
+                // keeps the fallback fresh.
+                let scale = self.scale_factor;
+                self.cursor = Some(LogicalPosition::new(position.x / scale, position.y / scale));
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -369,38 +409,15 @@ impl ApplicationHandler for OrbApp {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
-        }
-    }
-
-    fn device_event(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-        _device_id: winit::event::DeviceId,
-        event: winit::event::DeviceEvent,
-    ) {
-        // The pointer is tracked at the device level because the orb window
-        // is click-through: it never receives ordinary cursor-moved events,
-        // and a companion that only follows the mouse when the mouse is over
-        // it would be useless.
-        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
-            let scale = self
-                .window
-                .as_ref()
-                .map(|w| w.scale_factor())
-                .unwrap_or(1.0);
-            let current = self.cursor.unwrap_or_else(|| {
-                self.window
-                    .as_ref()
-                    .and_then(|w| w.outer_position().ok())
-                    .map(|p: PhysicalPosition<i32>| {
-                        LogicalPosition::new(p.x as f64 / scale, p.y as f64 / scale)
-                    })
-                    .unwrap_or(LogicalPosition::new(0.0, 0.0))
-            });
-            self.cursor = Some(LogicalPosition::new(
-                current.x + delta.0,
-                current.y + delta.1,
-            ));
+        } else if self.presence.current > 0.0 {
+            // Following must not wait for the next frame: the orb moving at
+            // the animation rate reads as lag, while moving the window is
+            // nearly free.
+            let dt = self.last_frame.elapsed().as_secs_f32();
+            if let (Some(window), Some(position)) = (self.window.clone(), self.desired_position(dt))
+            {
+                window.set_outer_position(position);
+            }
         }
     }
 }

@@ -126,7 +126,10 @@ impl OrbParams {
             saturation: theme.saturation,
             brightness: theme.intensity,
             glow: theme.glow,
-            alpha: 1.0,
+            // Not fully opaque: what is behind the orb should still be
+            // legible through it, which is most of what makes it read as a
+            // presence rather than an icon.
+            alpha: 0.82,
             ..Default::default()
         }
     }

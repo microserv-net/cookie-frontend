@@ -177,6 +177,22 @@ pub enum VoiceEvent {
         forwarded: bool,
     },
 
+    /// The backend asked this machine to do something.
+    ///
+    /// Emitted for every request, including refused ones, so the activity
+    /// view shows what Cookie was asked to do and not only what she did.
+    #[serde(rename = "tool")]
+    Tool {
+        id: String,
+        tool: String,
+        /// `requested`, `confirming`, `running`, `done`, `failed`, `refused`,
+        /// `declined`.
+        stage: String,
+        risk: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+
     /// A diagnostics run finished.
     #[serde(rename = "diagnostics")]
     Diagnostics {
@@ -224,6 +240,7 @@ impl VoiceEvent {
             VoiceEvent::Interrupted { .. } => "interrupted",
             VoiceEvent::ProviderStatus { .. } => "provider.status",
             VoiceEvent::Task { .. } => "task",
+            VoiceEvent::Tool { .. } => "tool",
             VoiceEvent::Intent { .. } => "intent",
             VoiceEvent::Diagnostics { .. } => "diagnostics",
             VoiceEvent::RetentionSwept { .. } => "retention.swept",

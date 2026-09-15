@@ -37,10 +37,11 @@ struct OrbUniform {
     e: [f32; 4],
     f: [f32; 4],
     g: [f32; 4],
+    h: [f32; 4],
 }
 
 impl OrbUniform {
-    fn from_params(p: &OrbParams, aspect: f32, background_alpha: f32) -> Self {
+    fn from_params(p: &OrbParams, aspect: f32, background_alpha: f32, premultiplied: bool) -> Self {
         Self {
             a: [p.time, p.radius, p.wobble, p.turbulence],
             b: [p.swirl, p.flow_speed, p.noise_scale, p.detail],
@@ -49,6 +50,7 @@ impl OrbUniform {
             e: [p.distortion, p.offset[0], p.offset[1], p.spin],
             f: [p.energy, p.bands[0], p.bands[1], p.bands[2]],
             g: [p.onset, p.seed, aspect, background_alpha],
+            h: [if premultiplied { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -65,6 +67,8 @@ pub struct GpuState {
     backend: String,
     /// False when the compositor refused a transparent surface.
     transparent: bool,
+    /// Whether the surface expects colour already multiplied by alpha.
+    premultiplied: bool,
 }
 
 impl std::fmt::Debug for GpuState {
@@ -124,17 +128,27 @@ impl GpuState {
 
         // Ask for a compositing mode that respects alpha; fall back quietly.
         let capabilities = surface.get_capabilities(&adapter);
+        // Order matters, and getting it wrong is what put a visible dark
+        // square around the orb on macOS: Metal offers PostMultiplied, not
+        // PreMultiplied, so the preferred-first search fell through to
+        // "no transparency" and drew an opaque window. Both conventions are
+        // now accepted and the shader is told which one it got.
         let wanted_alpha = if app_config.ui.transparent {
             [
-                wgpu::CompositeAlphaMode::PreMultiplied,
                 wgpu::CompositeAlphaMode::PostMultiplied,
+                wgpu::CompositeAlphaMode::PreMultiplied,
                 wgpu::CompositeAlphaMode::Inherit,
+                wgpu::CompositeAlphaMode::Auto,
             ]
             .into_iter()
             .find(|mode| capabilities.alpha_modes.contains(mode))
         } else {
             None
         };
+        let premultiplied = matches!(
+            wanted_alpha,
+            Some(wgpu::CompositeAlphaMode::PreMultiplied) | None
+        );
         let transparent = wanted_alpha.is_some();
         if let Some(mode) = wanted_alpha {
             config.alpha_mode = mode;
@@ -155,7 +169,7 @@ impl GpuState {
             source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/orb.wgsl").into()),
         });
 
-        let uniform = OrbUniform::from_params(&OrbParams::default(), 1.0, 0.0);
+        let uniform = OrbUniform::from_params(&OrbParams::default(), 1.0, 0.0, premultiplied);
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("orb-uniforms"),
             contents: bytemuck::bytes_of(&uniform),
@@ -211,7 +225,11 @@ impl GpuState {
                     format: config.format,
                     // The shader outputs premultiplied alpha, which is what a
                     // transparent window needs to composite correctly.
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    blend: Some(if premultiplied {
+                        wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
+                    } else {
+                        wgpu::BlendState::ALPHA_BLENDING
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -229,6 +247,7 @@ impl GpuState {
             bind_group,
             backend: format!("{:?}", adapter.get_info().backend),
             transparent,
+            premultiplied,
         })
     }
 
@@ -254,7 +273,7 @@ impl GpuState {
     /// Draw one frame.
     pub fn render(&mut self, params: &OrbParams, background_alpha: f32) -> Result<()> {
         let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
-        let uniform = OrbUniform::from_params(params, aspect, background_alpha);
+        let uniform = OrbUniform::from_params(params, aspect, background_alpha, self.premultiplied);
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
 

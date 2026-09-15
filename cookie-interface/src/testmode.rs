@@ -125,6 +125,18 @@ pub async fn run(engine: &Engine) -> Result<TestOutcome> {
         ));
     };
 
+    // A stand-in provider produces a transcript that is not a transcription.
+    // Reporting "heard: My name is Alex" in that state is how this check came
+    // to pass on a machine where nothing was being recognised at all.
+    if transcript.contains("stand-in recogniser") {
+        return Err(Error::ModelUnavailable {
+            name: "speech recognition".into(),
+            reason: "no recogniser is installed, so nothing was transcribed. \
+                     Run `cookie-interface --setup` to fetch one."
+                .into(),
+        });
+    }
+
     let name = extract_name(&transcript);
     let reply = match &name {
         Some(name) => format!("Nice to meet you, {name}."),

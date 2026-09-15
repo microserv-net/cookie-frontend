@@ -12,24 +12,22 @@ use std::time::Instant;
 use crate::audio::AudioBuffer;
 use crate::config::SttConfig;
 use crate::error::Result;
-use crate::util::{BoxFuture, Rng};
+use crate::util::BoxFuture;
 
 use super::{SpeechRecognizer, SttCapabilities, TranscribeOptions, Transcript};
 
-/// Phrases handed out when no script is queued. Chosen so `--test` produces a
-/// believable "name" answer.
-const FALLBACK: &[&str] = &[
-    "My name is Alex",
-    "I'm Robin",
-    "This is Sam",
-    "Call me Jordan",
-];
+/// What the stand-in says when it is given audio and no script.
+///
+/// It used to hand out plausible names, which made `--test` look like it was
+/// working when it was hearing nothing at all — the worst possible failure
+/// for a diagnostic. It now says what it is, once, so the transcript is
+/// obviously not a transcription.
+const STAND_IN: &str = "[the stand-in recogniser is not transcribing; run --setup]";
 
 /// A recogniser that returns scripted text instead of running a model.
 #[derive(Debug)]
 pub struct MockRecognizer {
     script: Mutex<VecDeque<String>>,
-    rng: Mutex<Rng>,
     /// Simulated model latency, so timing-sensitive code is exercised.
     latency_ms: u64,
     label: String,
@@ -47,7 +45,6 @@ impl MockRecognizer {
     pub fn new(script: Vec<String>) -> Self {
         Self {
             script: Mutex::new(script.into_iter().collect()),
-            rng: Mutex::new(Rng::new(0xC00C1E)),
             latency_ms: 40,
             label: "mock".to_string(),
         }
@@ -90,8 +87,7 @@ impl MockRecognizer {
         if audio.rms() < 1e-4 {
             return String::new();
         }
-        let idx = self.rng.lock().unwrap().below(FALLBACK.len());
-        FALLBACK[idx].to_string()
+        STAND_IN.to_string()
     }
 }
 
@@ -193,10 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn fallback_is_deterministic() {
-        let a = MockRecognizer::new(Vec::new());
-        let b = MockRecognizer::new(Vec::new());
-        let audio = noisy(200);
-        assert_eq!(a.next_text(&audio), b.next_text(&audio));
+    fn the_stand_in_never_invents_words() {
+        // It used to return plausible names, which made `--test` look like it
+        // was transcribing when it was hearing nothing.
+        let recognizer = MockRecognizer::new(Vec::new());
+        let heard = recognizer.next_text(&noisy(200));
+        assert!(heard.contains("stand-in"), "{heard}");
+        assert!(heard.contains("--setup"), "it must say what to do: {heard}");
     }
 }

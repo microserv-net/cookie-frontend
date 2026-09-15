@@ -269,6 +269,111 @@ const PATTERNS: &[Pattern] = &[
     },
 ];
 
+/// What somebody said when asked to confirm something.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Affirmation {
+    /// Any clear yes.
+    Yes,
+    /// Any clear no.
+    No,
+    /// "You don't need to ask me again for this."
+    StopAsking,
+    /// Not an answer to the question. Treated as "still waiting", never as
+    /// consent — silence and confusion must not authorise anything.
+    Unclear,
+}
+
+/// Read a spoken answer to a confirmation.
+///
+/// Deliberately generous about yes ("go on", "yeah do it", "that's fine") and
+/// strict about what counts as one: anything not recognisably an answer is
+/// `Unclear`, and the caller waits or asks again rather than proceeding.
+pub fn parse_affirmation(text: &str) -> Affirmation {
+    let normalised = normalise(text);
+    let words: Vec<&str> = normalised.split_whitespace().collect();
+    if words.is_empty() {
+        return Affirmation::Unclear;
+    }
+
+    // "Stop asking" first: it contains a yes, and the broader instruction is
+    // the one that matters.
+    const STOP: &[&str] = &[
+        "no need to ask",
+        "dont need to ask",
+        "stop asking",
+        "dont ask me",
+        "dont ask again",
+        "you dont have to ask",
+        "no more confirmations",
+        "just do it from now on",
+    ];
+    if STOP
+        .iter()
+        .any(|phrase| normalised.contains(&normalise(phrase)))
+    {
+        return Affirmation::StopAsking;
+    }
+
+    const NO: &[&str] = &[
+        "no",
+        "nope",
+        "dont",
+        "do not",
+        "stop",
+        "cancel",
+        "wait",
+        "hold on",
+        "leave it",
+        "forget it",
+        "nevermind",
+        "never mind",
+        "absolutely not",
+        "rather not",
+        "bad idea",
+    ];
+    const YES: &[&str] = &[
+        "yes",
+        "yeah",
+        "yep",
+        "yup",
+        "sure",
+        "okay",
+        "ok",
+        "fine",
+        "go ahead",
+        "go on",
+        "do it",
+        "please do",
+        "thats fine",
+        "sounds good",
+        "alright",
+        "carry on",
+        "of course",
+        "absolutely",
+        "correct",
+        "right",
+    ];
+
+    // Negation wins on a tie: "yes, but no" is not consent.
+    let said_no = NO.iter().any(|p| phrase_present(&normalised, &words, p));
+    if said_no {
+        return Affirmation::No;
+    }
+    if YES.iter().any(|p| phrase_present(&normalised, &words, p)) {
+        return Affirmation::Yes;
+    }
+    Affirmation::Unclear
+}
+
+fn phrase_present(normalised: &str, words: &[&str], phrase: &str) -> bool {
+    let phrase = normalise(phrase);
+    if phrase.contains(' ') {
+        normalised.contains(&phrase)
+    } else {
+        words.iter().any(|w| *w == phrase)
+    }
+}
+
 /// Fuzzy intent inference over a small, fixed set of interface commands.
 #[derive(Debug, Clone)]
 pub struct IntentEngine {
@@ -562,6 +667,61 @@ mod tests {
         assert!(!Intent::Diagnostics.consumes_utterance());
         assert!(Intent::StopSpeaking.consumes_utterance());
         assert!(Intent::CancelTask.consumes_utterance());
+    }
+
+    #[test]
+    fn confirmations_accept_the_many_ways_people_say_yes() {
+        for phrase in [
+            "yes",
+            "yeah",
+            "yep",
+            "go ahead",
+            "do it",
+            "that's fine",
+            "okay",
+            "sure",
+            "sounds good",
+            "alright, carry on",
+        ] {
+            assert_eq!(parse_affirmation(phrase), Affirmation::Yes, "{phrase}");
+        }
+    }
+
+    #[test]
+    fn confirmations_recognise_a_refusal() {
+        for phrase in ["no", "nope", "don't", "stop", "leave it", "actually no"] {
+            assert_eq!(parse_affirmation(phrase), Affirmation::No, "{phrase}");
+        }
+    }
+
+    #[test]
+    fn a_hedged_yes_is_not_consent() {
+        // Negation wins on a tie: this is the asymmetry that matters.
+        assert_eq!(parse_affirmation("yes but no"), Affirmation::No);
+        assert_eq!(parse_affirmation("yeah actually don't"), Affirmation::No);
+    }
+
+    #[test]
+    fn stop_asking_is_recognised_as_more_than_a_yes() {
+        for phrase in [
+            "no need to ask for confirmation",
+            "you don't need to ask me again",
+            "stop asking, just do it",
+        ] {
+            assert_eq!(
+                parse_affirmation(phrase),
+                Affirmation::StopAsking,
+                "{phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_that_is_not_an_answer_is_unclear() {
+        // Silence and confusion must never authorise anything.
+        for phrase in ["", "hmm", "what did you say", "the weather is nice"] {
+            assert_eq!(parse_affirmation(phrase), Affirmation::Unclear, "{phrase}");
+        }
     }
 
     #[test]

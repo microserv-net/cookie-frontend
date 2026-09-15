@@ -36,6 +36,7 @@ pub mod state;
 pub mod stt;
 pub mod tasks;
 pub mod testmode;
+pub mod tools;
 pub mod tts;
 pub mod util;
 

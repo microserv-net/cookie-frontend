@@ -348,9 +348,14 @@ fn check_input(_config: &Config, live: &LiveStatus, probe: bool) -> Check {
                 .with_hint("plug one in, or drive me through POST /v1/audio instead");
             }
             Ok(devices) => {
+                // What will actually be used, not what merely exists. These
+                // differ on any machine with a virtual audio device
+                // installed, and reporting the wrong one sends people
+                // debugging a microphone that was never involved.
                 let name = live
                     .input_device
                     .clone()
+                    .or_else(crate::audio::CpalInput::default_name)
                     .unwrap_or_else(|| devices[0].clone());
                 return Check::new(
                     "audio.input",
@@ -407,6 +412,7 @@ fn check_output(_config: &Config, live: &LiveStatus, probe: bool) -> Check {
                 let name = live
                     .output_device
                     .clone()
+                    .or_else(crate::audio::CpalOutput::default_name)
                     .unwrap_or_else(|| devices[0].clone());
                 return Check::new(
                     "audio.output",

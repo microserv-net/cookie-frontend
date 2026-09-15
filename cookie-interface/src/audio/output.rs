@@ -294,6 +294,20 @@ mod cpal_impl {
             Ok((device, config, name))
         }
 
+        /// The device that will actually be used when nothing is configured.
+        ///
+        /// Not the first one enumerated: on macOS that is whatever sorts
+        /// first, which is how `--doctor` came to report a virtual loopback
+        /// device nobody had selected while playback was correctly using the
+        /// built-in speakers. Diagnostics must report what will happen, not
+        /// what is merely present.
+        pub fn default_name() -> Option<String> {
+            cpal::default_host()
+                .default_output_device()
+                .map(|d| super::super::input::cpal_device_name(&d))
+        }
+
+        /// Device names for `--doctor`.
         pub fn list() -> Result<Vec<String>> {
             let host = cpal::default_host();
             Ok(host

@@ -26,7 +26,7 @@ default = ["ui", "audio-io", "http-providers"]
 
 # Procedural orb renderer (wgpu + winit). Disable for headless/server builds
 # and for CI: `cargo test --no-default-features --features audio-io`.
-ui = ["dep:wgpu", "dep:winit", "dep:pollster", "dep:bytemuck", "dep:raw-window-handle"]
+ui = ["dep:mouse_position", "dep:wgpu", "dep:winit", "dep:pollster", "dep:bytemuck", "dep:raw-window-handle"]
 
 # Real microphone / speaker I/O through cpal. Without it the engine still
 # runs against the in-process mock devices (used by the test-suite).
@@ -84,6 +84,11 @@ winit = { version = "0.30", optional = true }
 pollster = { version = "1", optional = true }
 bytemuck = { version = "1", features = ["derive"], optional = true }
 raw-window-handle = { version = "0.6", optional = true }
+# The pointer's position in screen coordinates. winit only reports motion
+# relative to a window, and the cursor companion has to follow the pointer
+# across the whole desktop — including over other applications, where no
+# window of ours receives anything.
+mouse_position = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

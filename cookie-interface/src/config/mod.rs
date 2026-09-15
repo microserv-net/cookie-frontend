@@ -40,6 +40,8 @@ pub struct Config {
     /// [`BackendConfig`]; leaving it disabled is the normal state for a
     /// front-end driven entirely over the HTTP API.
     pub backend: BackendConfig,
+    /// What Cookie may do on this machine, and when she asks first.
+    pub tools: ToolsConfig,
     pub audio: AudioConfig,
     pub vad: VadConfig,
     pub stt: SttConfig,
@@ -55,6 +57,7 @@ impl Default for Config {
             version: CONFIG_VERSION,
             api: ApiConfig::default(),
             backend: BackendConfig::default(),
+            tools: ToolsConfig::default(),
             audio: AudioConfig::default(),
             vad: VadConfig::default(),
             stt: SttConfig::default(),
@@ -318,12 +321,19 @@ impl Default for VadConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            threshold_db: 9.0,
-            speech_ms: 120,
+            // Above the adaptive noise floor. Nine was too eager: a quiet room
+            // on a laptop microphone drifts by that much, and the result was
+            // "speech detected" at -45 dB with nobody talking.
+            threshold_db: 14.0,
+            // Long enough that a keyboard clack or a chair creak cannot open
+            // an utterance on its own.
+            speech_ms: 200,
             silence_ms: 700,
             preroll_ms: 300,
             max_utterance_ms: 30_000,
-            min_utterance_ms: 250,
+            // Judged on voiced audio only. Anything shorter than this is a
+            // noise, not a sentence.
+            min_utterance_ms: 450,
         }
     }
 }
@@ -556,10 +566,13 @@ impl Default for UiConfig {
             always_on_top: true,
             transparent: true,
             click_through: true,
-            width: 160,
-            height: 160,
+            // The orb lives beside the pointer, so it is measured against the
+            // pointer: a little smaller than the arrow, not a panel. The
+            // window is larger than the orb because the glow needs room.
+            width: 72,
+            height: 72,
             dock_corner: DockCorner::BottomRight,
-            cursor_offset: [34.0, 26.0],
+            cursor_offset: [16.0, 14.0],
             visibility: VisibilityConfig::default(),
             cursor_follow_lag: 0.0,
             target_fps: 60,
@@ -595,7 +608,9 @@ impl Default for ThemeConfig {
             hue: 28.0,
             hue_secondary: 42.0,
             saturation: 0.78,
-            intensity: 1.0,
+            // Below one: the orb is meant to be seen *through*, not to sit on
+            // the desktop like a sticker.
+            intensity: 0.85,
             background_alpha: 0.0,
             glow: 1.0,
         }
@@ -718,6 +733,58 @@ impl VisibilityConfig {
             Speaking => self.when_speaking,
             Interrupted => self.when_speaking || self.when_idle,
             Error => self.when_error,
+        }
+    }
+}
+
+/// Local tool execution.
+///
+/// Off by default. The backend being able to run commands on your laptop is
+/// a decision you should make deliberately, not one you discover you made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolsConfig {
+    /// Allow the backend to ask this machine to do things at all.
+    pub enabled: bool,
+    /// Tools that are never offered, by name — e.g. `["shell.run"]` for a
+    /// machine where you want Cookie to look but not touch.
+    pub blocked: Vec<String>,
+    /// Anything at or below this risk runs without asking:
+    /// `safe`, `normal`, `dangerous`, `critical`.
+    pub auto_approve_up_to: crate::tools::Risk,
+    /// Refuse anything above this outright, whatever is said.
+    pub refuse_above: crate::tools::Risk,
+    /// Always confirm irreversible operations, even after "stop asking".
+    /// Turning this off is possible and inadvisable.
+    pub always_confirm_critical: bool,
+    /// How long to wait for a spoken answer to a confirmation before giving
+    /// up and telling the backend the request was declined. Silence is not
+    /// consent, so this expires into a refusal rather than an approval.
+    pub confirmation_timeout_secs: u64,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            blocked: Vec::new(),
+            auto_approve_up_to: crate::tools::Risk::Safe,
+            refuse_above: crate::tools::Risk::Critical,
+            always_confirm_critical: true,
+            confirmation_timeout_secs: 45,
+        }
+    }
+}
+
+impl ToolsConfig {
+    /// The policy these settings describe.
+    pub fn policy(&self) -> crate::tools::PermissionPolicy {
+        crate::tools::PermissionPolicy {
+            auto_approve_up_to: self.auto_approve_up_to,
+            refuse_above: self.refuse_above,
+            always_confirm_critical: self.always_confirm_critical,
+            blocked: self.blocked.iter().cloned().collect(),
+            suppressed: None,
         }
     }
 }

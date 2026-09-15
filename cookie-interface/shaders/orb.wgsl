@@ -25,6 +25,8 @@ struct Orb {
     f: vec4<f32>,
     // x: onset, y: seed, z: aspect, w: background alpha
     g: vec4<f32>,
+    // x: 1 when the surface expects premultiplied colour, 0 when it does not
+    h: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> orb: Orb;
@@ -212,11 +214,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     colour = colour + hsv(hue - 8.0, saturation * 0.6, 1.0) * bloom * 0.55;
 
     var alpha = clamp(accum * 1.15 + bloom * 0.75, 0.0, 1.0) * orb.c.z;
-    // Keep a whisper of the background tint when the window is opaque.
-    let background = orb.g.w;
-    alpha = max(alpha, background);
 
-    // Premultiplied output: required for correct compositing on a
-    // transparent window, and harmless otherwise.
-    return vec4<f32>(colour * alpha, alpha);
+    // The glow decays exponentially, so it never quite reaches zero — and a
+    // window-sized rectangle of alpha 0.01 is a visible square on a dark
+    // desktop. Cut it off, and ease the last of it out so the edge does not
+    // become a hard circle instead.
+    alpha = alpha * smoothstep(0.012, 0.06, alpha);
+    // Past the window's inscribed circle there is nothing to draw at all.
+    let reach = min(1.0 * aspect, 1.0);
+    alpha = alpha * (1.0 - smoothstep(reach * 0.72, reach * 0.98, dist));
+
+    // Keep a whisper of the background tint when the window is opaque.
+    alpha = max(alpha, orb.g.w);
+
+    if (orb.h.x > 0.5) {
+        return vec4<f32>(colour * alpha, alpha);
+    }
+    return vec4<f32>(colour, alpha);
 }
