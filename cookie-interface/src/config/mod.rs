@@ -576,12 +576,13 @@ impl Default for UiConfig {
             // beside: the orb itself is about twenty points across, a little
             // smaller than the arrow. The window is wider than the orb
             // because the glow needs somewhere to fall off.
-            width: 44,
-            height: 44,
+            width: 34,
+            height: 34,
             dock_corner: DockCorner::BottomRight,
-            // Just off the tip of the arrow. Far enough not to obscure what
-            // is under the pointer, close enough to read as attached to it.
-            cursor_offset: [18.0, 12.0],
+            // To the right of the arrow and level with it: the pointer's hot
+            // spot is its top-left corner, so anything below reads as
+            // detached, and anything to the left sits under the hand.
+            cursor_offset: [20.0, 0.0],
             visibility: VisibilityConfig::default(),
             cursor_follow_lag: 0.0,
             target_fps: 60,
@@ -616,12 +617,14 @@ impl Default for ThemeConfig {
         Self {
             hue: 28.0,
             hue_secondary: 42.0,
-            saturation: 0.78,
-            // Below one: the orb is meant to be seen *through*, not to sit on
-            // the desktop like a sticker.
-            intensity: 0.85,
+            saturation: 0.92,
+            // Well below one. Above it the shader saturates and the brown
+            // washes out to white, which is what made it look like a lamp
+            // rather than a small warm thing.
+            intensity: 0.62,
             background_alpha: 0.0,
-            glow: 1.0,
+            // Enough to look lit from within, not enough to draw a halo.
+            glow: 0.45,
         }
     }
 }

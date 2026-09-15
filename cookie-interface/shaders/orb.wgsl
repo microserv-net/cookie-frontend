@@ -195,9 +195,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     accum = clamp(accum, 0.0, 1.0);
 
     // Outer bloom, independent of the marched body so the glow survives even
-    // when the body is thin.
-    let glow_amount = orb.c.x * (0.55 + energy * 0.6 + onset * 0.5);
-    let bloom = exp(-max(dist - edge * 0.82, 0.0) * (7.5 - energy * 2.0)) * glow_amount;
+    // when the body is thin. Tight on purpose: a wide bloom on a small orb
+    // reads as a halo drawn around it rather than as light coming off it.
+    let glow_amount = orb.c.x * (0.35 + energy * 0.4 + onset * 0.3);
+    let bloom = exp(-max(dist - edge * 0.9, 0.0) * 16.0) * glow_amount;
 
     // Colour: hue travels from the core outward, so the entity has depth
     // rather than being one flat purple.
@@ -213,16 +214,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         * max(rim, 0.0) * (0.18 + energy * 0.35) * accum;
     colour = colour + hsv(hue - 8.0, saturation * 0.6, 1.0) * bloom * 0.55;
 
-    var alpha = clamp(accum * 1.15 + bloom * 0.75, 0.0, 1.0) * orb.c.z;
+    var alpha = clamp(accum * 1.15 + bloom * 0.6, 0.0, 1.0) * orb.c.z;
 
-    // The glow decays exponentially, so it never quite reaches zero — and a
+    // The glow decays exponentially and never quite reaches zero, and a
     // window-sized rectangle of alpha 0.01 is a visible square on a dark
-    // desktop. Cut it off, and ease the last of it out so the edge does not
-    // become a hard circle instead.
-    alpha = alpha * smoothstep(0.012, 0.06, alpha);
-    // Past the window's inscribed circle there is nothing to draw at all.
-    let reach = min(1.0 * aspect, 1.0);
-    alpha = alpha * (1.0 - smoothstep(reach * 0.72, reach * 0.98, dist));
+    // desktop. It has to be cut off — but cutting it off at a fixed radius is
+    // what drew a ring around the orb, because the cut itself has an edge.
+    // Fading on the *alpha* instead means the boundary follows the shape of
+    // the light rather than a circle laid over it.
+    alpha = alpha * smoothstep(0.02, 0.14, alpha);
 
     // Keep a whisper of the background tint when the window is opaque.
     alpha = max(alpha, orb.g.w);

@@ -65,6 +65,15 @@ pub struct Cli {
     #[arg(long)]
     pub no_ui: bool,
 
+    /// Print every transcript to the terminal as it happens.
+    ///
+    /// Everything else behaves normally; this only adds output. It exists
+    /// because "is it hearing me?" is otherwise answerable only by watching
+    /// the event stream in another window, and that is a poor way to find out
+    /// that recognition is failing.
+    #[arg(long)]
+    pub transcriber: bool,
+
     /// Fix the animation seed so a visual bug can be reproduced exactly.
     #[arg(long, value_name = "SEED")]
     pub seed: Option<u64>,
@@ -133,6 +142,13 @@ mod tests {
             "ui.theme.hue=28",
         ]);
         assert_eq!(cli.set.len(), 2);
+    }
+
+    #[test]
+    fn the_transcriber_flag_is_a_session_not_a_command() {
+        let cli = Cli::parse_from(["cookie-interface", "--transcriber"]);
+        assert!(cli.transcriber);
+        assert!(!cli.is_oneshot(), "it runs normally and also prints");
     }
 
     #[test]

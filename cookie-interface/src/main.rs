@@ -205,6 +205,11 @@ fn real_main(cli: Cli) -> Result<()> {
         };
     }
 
+    if cli.transcriber {
+        runtime.spawn(print_transcripts(engine.clone()));
+        println!("  transcribing to this terminal; speak when you are ready");
+    }
+
     // The API server runs for as long as the process does.
     let api_state = ApiState {
         engine: engine.clone(),
@@ -257,6 +262,54 @@ fn real_main(cli: Cli) -> Result<()> {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server).await;
     });
     Ok(())
+}
+
+/// Print what is heard, and why it was not heard when that happens.
+///
+/// Deliberately includes the failures and the latency: "nothing appeared" is
+/// the symptom for a dozen different causes, and the difference between a
+/// recogniser that is slow, one that is erroring, and one that is hearing
+/// silence is exactly what this is for.
+async fn print_transcripts(engine: Engine) {
+    use cookie_interface::events::VoiceEvent;
+
+    let mut events = engine.bus().subscribe();
+    while let Ok(envelope) = events.recv().await {
+        match envelope.event {
+            VoiceEvent::SpeechDetected { level_db } => {
+                println!("  ♪ speech at {level_db:.0} dB");
+            }
+            VoiceEvent::SpeechEnded { duration_ms } => {
+                println!("  … {duration_ms} ms of speech, transcribing");
+            }
+            VoiceEvent::TranscriptPartial { text, .. } => {
+                println!("  … {text}");
+            }
+            VoiceEvent::TranscriptFinal {
+                text, duration_ms, ..
+            } => {
+                println!("  ▸ {text}   ({duration_ms} ms of audio)");
+            }
+            VoiceEvent::Error { message, hint, .. } => {
+                println!("  ! {message}");
+                if let Some(hint) = hint {
+                    println!("    {hint}");
+                }
+            }
+            VoiceEvent::ProviderStatus {
+                kind,
+                provider,
+                status,
+                detail,
+            } => {
+                println!("  · {kind}: {provider} is {status}");
+                if let Some(detail) = detail {
+                    println!("    {detail}");
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn wait_for_signal(runtime: &tokio::runtime::Runtime) {

@@ -276,19 +276,42 @@ impl SpeechRecognizer for LocalRecognizer {
 
 /// Pull the transcript out of sherpa-onnx's output.
 ///
-/// It prints a block of diagnostics and then the result; the text is the last
-/// non-empty line that is not one of its own labels. Parsing by exclusion
-/// rather than by pattern because the diagnostics change between releases and
-/// the transcript does not.
+/// It prints its whole configuration, then the file name, then a block of
+/// timings, and then the result as a JSON object:
+///
+/// ```text
+/// {"lang": "", "text": "After early nightfall the yellow lamps …", "tokens": [...]}
+/// ```
+///
+/// The first version of this discarded every line beginning with `{` as
+/// noise, which threw away the only line that mattered and returned an empty
+/// transcript for every utterance — recognition appeared to be silently doing
+/// nothing. Parse the JSON; fall back to the last plain line for older builds
+/// that printed bare text.
 pub(crate) fn parse_output(stdout: &str) -> String {
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(text) = value.get("text").and_then(|t| t.as_str()) {
+                return text.trim().to_string();
+            }
+        }
+    }
+
+    // Older releases printed the text on its own line after the timings.
     const NOISE: &[&str] = &[
         "Creating recognizer",
+        "recognizer created",
         "Started",
         "Done!",
         "num threads",
         "decoding method",
         "Elapsed seconds",
         "Real time factor",
+        "Offline",
         "----",
         "/",
         "{",
@@ -379,7 +402,28 @@ mod tests {
     }
 
     #[test]
-    fn the_transcript_is_the_last_line_that_is_not_diagnostics() {
+    fn the_transcript_is_read_out_of_the_json_sherpa_actually_prints() {
+        // Captured verbatim from sherpa-onnx v1.13.8. The first version of
+        // the parser discarded every line starting with `{` as noise, which
+        // threw away this one and made recognition look silently broken.
+        let stdout = concat!(
+            "Creating recognizer ...\n",
+            "recognizer created in 0.668 s\n",
+            "Started\nDone!\n\n",
+            "/tmp/cookie-stt-1.wav\n",
+            "----\n",
+            "num threads: 1\n",
+            "decoding method: greedy_search\n",
+            "Elapsed seconds: 1.095 s\n",
+            "Real time factor (RTF): 1.095 / 6.625 = 0.165\n",
+            r#"{"lang": "", "emotion": "", "text": "My name is Robin.", "tokens":[" My"]}"#,
+            "\n"
+        );
+        assert_eq!(parse_output(stdout), "My name is Robin.");
+    }
+
+    #[test]
+    fn a_bare_text_line_still_works_for_older_builds() {
         let stdout = "Creating recognizer ...\n\
                       /tmp/cookie-stt-1.wav\n\
                       ----\n\
@@ -391,7 +435,11 @@ mod tests {
 
     #[test]
     fn silence_produces_an_empty_transcript_rather_than_a_label() {
-        let stdout = "Creating recognizer ...\n/tmp/x.wav\n----\nDone!\n";
+        let stdout = concat!(
+            "Creating recognizer ...\n/tmp/x.wav\n----\nDone!\n",
+            r#"{"lang": "", "text": "", "tokens":[]}"#,
+            "\n"
+        );
         assert!(parse_output(stdout).is_empty());
     }
 }
