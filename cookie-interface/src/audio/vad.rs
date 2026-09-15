@@ -172,6 +172,20 @@ impl Vad for EnergyVad {
             return VadDecision::quiet();
         }
 
+        // Below the absolute floor nothing is speech, whatever its margin
+        // over the noise floor. In a quiet room the adaptive floor falls to
+        // about -60 dBFS, and then a few decibels of fan noise clears the
+        // relative threshold — which is exactly how "speech detected at
+        // -48 dB" happened with nobody talking. Relative thresholds need an
+        // absolute one underneath them.
+        if features.level_db < self.cfg.floor_db {
+            self.evidence *= 0.5;
+            if matches!(self.phase, Phase::Silence) {
+                self.remember(frame);
+                return VadDecision::quiet();
+            }
+        }
+
         // Evidence combines "louder than the noise floor" with "sounds voiced".
         // Energy alone opens on a door slam; voicing alone is too twitchy at
         // low levels.
@@ -186,7 +200,7 @@ impl Vad for EnergyVad {
         let coeff = if target > self.evidence { 0.5 } else { 0.2 };
         self.evidence += (target - self.evidence) * coeff;
 
-        let speechy = self.evidence > 0.5;
+        let speechy = self.evidence > 0.5 && features.level_db >= self.cfg.floor_db;
         let mut event = None;
 
         match self.phase {
@@ -278,6 +292,9 @@ impl Vad for EnergyVad {
 
 #[cfg(test)]
 mod tests {
+    // (regression) Room tone must never open an utterance. The symptom was
+    // "speech detected at -48 dB" with nobody in the room, every few seconds,
+    // each one starting a recogniser run.
     use super::*;
     use crate::audio::features::{AudioAnalyzer, FeatureSource};
 
@@ -478,5 +495,49 @@ mod tests {
         let mut h = Harness::new(cfg);
         let events = h.feed(&speech(2000, 0.8));
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn room_tone_is_not_speech_however_quiet_the_room_is() {
+        let mut vad = EnergyVad::new(VadConfig::default(), 16_000, 20);
+        let frame = vec![0.0f32; 320];
+
+        // A very quiet room: the adaptive noise floor sinks, so faint noise
+        // clears the *relative* threshold comfortably. It must still be
+        // rejected on absolute level.
+        let mut features = AudioFeatures::silent();
+        features.level_db = -48.0;
+        features.noise_floor_db = -70.0;
+        features.voiced = 1.0;
+
+        for _ in 0..200 {
+            let decision = vad.push(&frame, &features);
+            assert!(
+                decision.event.is_none(),
+                "room tone at {} dBFS opened an utterance",
+                features.level_db
+            );
+        }
+        assert!(!vad.is_speaking());
+    }
+
+    #[test]
+    fn ordinary_speech_still_opens_an_utterance() {
+        // The floor must not be so high that talking normally is ignored.
+        let mut vad = EnergyVad::new(VadConfig::default(), 16_000, 20);
+        let frame = vec![0.0f32; 320];
+        let mut features = AudioFeatures::silent();
+        features.level_db = -22.0;
+        features.noise_floor_db = -55.0;
+        features.voiced = 1.0;
+
+        let mut started = false;
+        for _ in 0..40 {
+            if vad.push(&frame, &features).event.is_some() {
+                started = true;
+                break;
+            }
+        }
+        assert!(started, "speech at -22 dBFS was not detected");
     }
 }

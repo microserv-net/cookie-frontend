@@ -188,8 +188,17 @@ fn tidy(rest: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A gate with the word *on*.
+    ///
+    /// The shipped default has it off — the mechanism is built and tested,
+    /// but it gates everything behind recognising one short word reliably in
+    /// a room, and that is not yet good enough to put in front of the rest.
+    /// These tests exercise the gate itself, so they switch it on.
     fn gate() -> WakeGate {
-        WakeGate::new(WakeConfig::default())
+        WakeGate::new(WakeConfig {
+            enabled: true,
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -282,6 +291,7 @@ mod tests {
     #[test]
     fn attention_lapses_on_its_own() {
         let mut gate = WakeGate::new(WakeConfig {
+            enabled: true,
             attention_secs: 1,
             ..Default::default()
         });
@@ -295,11 +305,8 @@ mod tests {
     }
 
     #[test]
-    fn disabling_the_gate_lets_everything_through() {
-        let mut gate = WakeGate::new(WakeConfig {
-            enabled: false,
-            ..Default::default()
-        });
+    fn the_shipped_default_lets_everything_through() {
+        let mut gate = WakeGate::new(WakeConfig::default());
         assert_eq!(
             gate.consider("what time is it"),
             Heard::Act("what time is it".into())
@@ -309,6 +316,7 @@ mod tests {
     #[test]
     fn a_different_name_can_be_configured() {
         let mut gate = WakeGate::new(WakeConfig {
+            enabled: true,
             word: "jarvis".into(),
             ..Default::default()
         });

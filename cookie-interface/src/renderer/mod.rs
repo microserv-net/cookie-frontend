@@ -162,7 +162,9 @@ impl OrbApp {
             features_rx: engine.bus().features(),
             events: engine.bus().subscribe(),
             hearing_speech: false,
-            awake: false,
+            // With the wake word off there is nothing to wake *from*: every
+            // utterance is addressed to her, so the orb follows speech alone.
+            awake: !config.wake.enabled,
             presence: Presence::new(config.ui.visibility.when_idle),
             director,
             engine,
@@ -311,7 +313,9 @@ impl OrbApp {
         if visibility.when_hearing_speech && self.hearing_speech && self.awake {
             return true;
         }
-        if self.awake {
+        // Being addressed is itself a reason, but only when the gate is on —
+        // otherwise this would be true forever and the orb would never leave.
+        if self.awake && self.config.wake.enabled {
             return true;
         }
         if visibility.wants(*self.state_rx.borrow()) {

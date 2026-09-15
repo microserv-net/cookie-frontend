@@ -308,6 +308,16 @@ pub struct VadConfig {
     pub enabled: bool,
     /// Speech must exceed the adaptive noise floor by this much (dB).
     pub threshold_db: f32,
+    /// Absolute level below which nothing counts as speech, in dBFS.
+    ///
+    /// The threshold above is *relative* to an adaptive noise floor, and in a
+    /// quiet room that floor drops to around -60 dBFS — at which point a
+    /// fluctuation of a few decibels clears it and the fan becomes an
+    /// utterance. That is what produced "speech detected at -48 dB" with
+    /// nobody in the room. Speech into a laptop microphone sits between -30
+    /// and -12 dBFS; anything below this is the room, whatever its margin
+    /// over the floor.
+    pub floor_db: f32,
     /// Consecutive speech-ish milliseconds before we declare speech started.
     pub speech_ms: u32,
     /// Trailing silence that ends an utterance.
@@ -328,6 +338,7 @@ impl Default for VadConfig {
             // on a laptop microphone drifts by that much, and the result was
             // "speech detected" at -45 dB with nobody talking.
             threshold_db: 11.0,
+            floor_db: -42.0,
             // Long enough that a keyboard clack or a chair creak cannot open
             // an utterance on its own.
             speech_ms: 200,
@@ -579,19 +590,19 @@ impl Default for UiConfig {
             // beside: the orb itself is about twenty points across, a little
             // smaller than the arrow. The window is wider than the orb
             // because the glow needs somewhere to fall off.
-            // The macOS arrow is about sixteen points wide. The body works
-            // out at roughly twelve across, which is smaller than the
-            // pointer; the window is wider than the body because the glow has
-            // to fade out *inside* it, and a window this small is still only
-            // a handful of pixels of compositing.
-            width: 40,
-            height: 40,
+            // The body is about five points across — a bead, not a bubble.
+            // The window is much wider than that because the glow has to fade
+            // to nothing *inside* it: anything clipped at the window edge is
+            // clipped along a straight line, and that straight line is the
+            // boundary that keeps reappearing.
+            width: 28,
+            height: 28,
             dock_corner: DockCorner::BottomRight,
             // To the right of the arrow and level with it: the pointer's hot
             // spot is its top-left corner, so anything below reads as
             // detached, and anything to the left sits under the hand.
             // Measured from the window's centre to the pointer's hot spot.
-            cursor_offset: [16.0, 2.0],
+            cursor_offset: [14.0, 2.0],
             visibility: VisibilityConfig::default(),
             cursor_follow_lag: 0.0,
             target_fps: 60,
@@ -787,6 +798,11 @@ pub struct WakeConfig {
     ///
     /// On by default. An assistant that acts on whatever it overhears is not
     /// an assistant you leave running.
+    /// Off for now. The wake word depends on recognising one short word
+    /// reliably in a room, and until recognition itself is comfortably fast
+    /// and accurate it gates everything behind its worst case — which is what
+    /// made the whole thing feel broken. The gate is built and tested; this
+    /// flag turns it on.
     pub enabled: bool,
     /// What to call her.
     pub word: String,
@@ -804,7 +820,7 @@ pub struct WakeConfig {
 impl Default for WakeConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             word: "cookie".into(),
             attention_secs: 20,
             acknowledge: false,

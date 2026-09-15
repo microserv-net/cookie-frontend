@@ -46,7 +46,8 @@ duck_input_while_speaking = true   # turn off with a headset for true barge-in
 listen_on_start = true             # off for push-to-talk via POST /v1/listen
 
 [vad]
-threshold_db = 9.0     # above the adaptive noise floor
+threshold_db = 11.0    # above the adaptive noise floor
+floor_db = -42.0       # and never below this, whatever the margin
 speech_ms = 120        # before declaring speech started
 silence_ms = 700       # before declaring it finished
 preroll_ms = 300       # kept so the first syllable survives
@@ -55,9 +56,14 @@ min_utterance_ms = 250 # judged on voiced audio, not buffer length
 
 ## `[wake]`
 
+**Off by default.** The mechanism is built and tested, but it gates everything
+behind recognising one short word reliably in a room, and until recognition is
+comfortably fast and accurate that means one bad transcription costs you the
+whole interaction. Turn it on when that stops being true.
+
 ```toml
 [wake]
-enabled = true        # act only on what is addressed to her
+enabled = false       # act only on what is addressed to her
 word = "cookie"
 attention_secs = 20   # follow-ups need no name; lapses on its own
 acknowledge = false   # say "Yes?" when called; the orb usually says it better

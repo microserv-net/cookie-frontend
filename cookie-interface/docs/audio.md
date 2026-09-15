@@ -108,7 +108,19 @@ Energy against an adaptive noise floor, smoothed into an evidence signal
 (65% loudness, 35% voicing), with four phases: Silence, Onset, Speech,
 Hangover.
 
-Three settings matter:
+Two thresholds, and both are needed:
+
+- `threshold_db` (11) — margin over the *adaptive* noise floor.
+- `floor_db` (-42) — an absolute level in dBFS, below which nothing is speech.
+
+The second exists because the first cannot stand alone. In a quiet room the
+adaptive floor sinks to around -60 dBFS, at which point a few decibels of fan
+noise clears the margin and the room becomes an utterance — observed as
+"speech detected at -48 dB" every few seconds with nobody talking, each one
+starting a recogniser run. Speech into a laptop microphone sits between -30
+and -12 dBFS, so the floor discards the room without touching anybody's voice.
+
+Three more settings matter:
 
 - `speech_ms` (120) — evidence must persist this long before declaring speech.
   Stops a door slam from opening an utterance.
