@@ -165,7 +165,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The body occupies well under half the window; the rest is room for the
     // glow to fade out inside, so nothing is ever clipped at the window edge —
     // a clip is a straight line, and a straight line is a visible boundary.
-    let radius = orb.a.y * 0.18;
+    let radius = orb.a.y * 0.125;
     let distortion = orb.e.x;
     let energy = orb.f.x;
     let onset = orb.g.x;
@@ -213,11 +213,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let value = orb.c.y * (0.35 + accum * 0.9 + onset * 0.25);
 
     var colour = hsv(hue, saturation, value);
-    // Rim light: the bright edge that reads as a membrane.
-    let rim = smoothstep(edge * 1.02, edge * 0.72, dist) - smoothstep(edge * 0.72, edge * 0.2, dist);
-    colour = colour + hsv(hue + orb.d.x * 0.6, saturation * 0.8, 1.0)
-        * max(rim, 0.0) * (0.18 + energy * 0.35) * accum;
-    colour = colour + hsv(hue - 8.0, saturation * 0.6, 1.0) * bloom * 0.55;
+    // There used to be a rim light here — a band brightest at the silhouette
+    // and dark on either side. On a large orb it reads as a membrane; at this
+    // size it is simply the ring that keeps being reported, because that is
+    // literally what it draws. Gone.
+    colour = colour + hsv(hue - 8.0, saturation * 0.6, 1.0) * bloom * 0.45;
 
     var alpha = clamp(accum * 1.15 + bloom * 0.6, 0.0, 1.0) * orb.c.z;
 

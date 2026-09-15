@@ -14,6 +14,8 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::audio::AudioBuffer;
@@ -36,6 +38,14 @@ pub struct LocalRecognizer {
     timeout_ms: u64,
     /// `cpu`, `coreml`, `cuda`… Whatever the runtime was built with.
     provider: String,
+    /// Set once the preferred provider has been shown not to work.
+    ///
+    /// Without this, every single utterance ran the recogniser twice — once
+    /// to fail on CoreML and once to succeed on the CPU — which doubled the
+    /// latency of a step that was already the slowest thing in the loop.
+    /// A runtime built without a provider fails identically forever, so one
+    /// failure is all the evidence there is going to be.
+    fell_back: Arc<AtomicBool>,
 }
 
 impl LocalRecognizer {
@@ -81,6 +91,7 @@ impl LocalRecognizer {
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
                 .unwrap_or_else(default_provider),
+            fell_back: Arc::new(AtomicBool::new(false)),
         };
         recognizer.check_files()?;
         Ok(recognizer)
@@ -229,15 +240,21 @@ impl SpeechRecognizer for LocalRecognizer {
             .map_err(|e| Error::Stt(e.to_string()))?;
             written?;
 
-            let mut attempt = self.run(&wav, &options, &self.provider).await;
-            if attempt.is_err() && self.provider != "cpu" {
-                // A runtime built without CoreML fails immediately and
-                // identically every time; falling back once beats failing
-                // forever on a machine that would have worked.
+            // Once the preferred provider has failed, stop asking: it will
+            // fail the same way every time, and paying for that on every
+            // utterance doubles the latency of the slowest step in the loop.
+            let preferred = if self.fell_back.load(Ordering::Relaxed) {
+                "cpu"
+            } else {
+                &self.provider
+            };
+            let mut attempt = self.run(&wav, &options, preferred).await;
+            if attempt.is_err() && preferred != "cpu" {
                 tracing::warn!(
                     provider = %self.provider,
-                    "the recogniser refused that execution provider; using the CPU"
+                    "the recogniser refused that execution provider; using the CPU from now on"
                 );
+                self.fell_back.store(true, Ordering::Relaxed);
                 attempt = self.run(&wav, &options, "cpu").await;
             }
             let _ = tokio::fs::remove_file(&wav).await;

@@ -27,7 +27,51 @@ pub use voice::{Gender, VoicePatch, VoiceSpec};
 
 /// Bumped only for changes that need migration logic. Readers must tolerate a
 /// *higher* version by ignoring unknown fields (serde does this for us).
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
+
+/// Bring an older configuration file up to date.
+///
+/// A default that changes only helps people who have never run the program.
+/// Anybody who has is holding a file written against the old one — which is
+/// how an installation ended up asking for a wake word that had since been
+/// switched off, and showing an orb whose visibility rule had since been
+/// rewritten. The behaviour people see comes from their file, so the file has
+/// to move.
+///
+/// Only settings the user is unlikely to have deliberately chosen are
+/// touched, and only when they still hold the old default. Anything edited by
+/// hand is left exactly as it is.
+pub fn migrate(config: &mut Config) -> Vec<String> {
+    let mut changes = Vec::new();
+    if config.version >= CONFIG_VERSION {
+        return changes;
+    }
+
+    // v1 → v2. The wake word shipped on, then went off; the orb's visibility
+    // keyed off "the microphone is open", which is true from startup; and the
+    // VAD had no absolute floor, so a quiet room registered as speech.
+    if config.wake.enabled {
+        config.wake.enabled = false;
+        changes.push("the wake word is off until recognition is quick enough for it".into());
+    }
+    if config.ui.visibility.when_listening {
+        config.ui.visibility.when_listening = false;
+        changes.push("the orb no longer appears merely because the microphone is open".into());
+    }
+    if config.vad.floor_db > -20.0 {
+        config.vad.floor_db = VadConfig::default().floor_db;
+        changes.push("the voice detector has an absolute silence floor now".into());
+    }
+    if config.ui.width > 60 || config.ui.height > 60 {
+        let defaults = UiConfig::default();
+        config.ui.width = defaults.width;
+        config.ui.height = defaults.height;
+        changes.push("the orb is the size of a cursor now".into());
+    }
+
+    config.version = CONFIG_VERSION;
+    changes
+}
 
 pub const DEFAULT_PORT: u16 = 8787;
 
@@ -91,13 +135,26 @@ impl Config {
 
     /// Load, and write defaults back if there was no file. Returns whether this
     /// looked like a first run.
+    ///
+    /// An existing file is migrated if it predates the current version, and
+    /// written back — see [`migrate`]. The alternative is a changed default
+    /// that only takes effect for people who have never run the program,
+    /// which is precisely the wrong half of the audience.
     pub fn load_or_init(paths: &Paths) -> Result<(Self, bool)> {
         let existed = paths.config_file().exists();
-        let cfg = Self::load(paths)?;
+        let mut cfg = Self::load(paths)?;
         if !existed {
             cfg.save(paths)?;
+            return Ok((cfg, true));
         }
-        Ok((cfg, !existed))
+        let changes = migrate(&mut cfg);
+        if !changes.is_empty() {
+            for change in &changes {
+                println!("  updated your configuration: {change}");
+            }
+            cfg.save(paths)?;
+        }
+        Ok((cfg, false))
     }
 
     /// Atomic write: serialise to `config.toml.new`, fsync, rename over the
@@ -810,8 +867,11 @@ pub struct WakeConfig {
     /// enough that forgetting to dismiss her is harmless — which matters,
     /// because forgetting is the normal case.
     pub attention_secs: u64,
-    /// Say something short when she starts listening, so it is obvious the
-    /// name was heard. The orb appearing usually says it better.
+    /// Say something short when she starts listening.
+    ///
+    /// On, because the alternative is being answered by silence and having no
+    /// way to tell whether the name was heard, the request was heard, or
+    /// nothing was.
     pub acknowledge: bool,
 }
 
@@ -821,7 +881,7 @@ impl Default for WakeConfig {
             enabled: false,
             word: "cookie".into(),
             attention_secs: 20,
-            acknowledge: false,
+            acknowledge: true,
         }
     }
 }
@@ -1064,6 +1124,38 @@ mod tests {
     fn frame_samples_matches_rate_and_frame_ms() {
         let a = AudioConfig::default();
         assert_eq!(a.frame_samples(), 320); // 20 ms @ 16 kHz
+    }
+
+    #[test]
+    fn an_old_file_is_brought_up_to_date() {
+        // The situation this exists for: a file written when the wake word
+        // shipped on and the orb appeared whenever the microphone was open.
+        // The user sees their file's behaviour, not the code's defaults.
+        let mut old = Config {
+            version: 1,
+            ..Default::default()
+        };
+        old.wake.enabled = true;
+        old.ui.visibility.when_listening = true;
+        old.vad.floor_db = 0.0;
+        old.ui.width = 160;
+        old.ui.height = 160;
+
+        let changes = migrate(&mut old);
+        assert_eq!(changes.len(), 4, "{changes:?}");
+        assert!(!old.wake.enabled);
+        assert!(!old.ui.visibility.when_listening);
+        assert!(old.vad.floor_db < -20.0);
+        assert!(old.ui.width <= 60);
+        assert_eq!(old.version, CONFIG_VERSION);
+    }
+
+    #[test]
+    fn migration_leaves_a_current_file_alone() {
+        let mut current = Config::default();
+        current.wake.enabled = true; // deliberately switched on
+        assert!(migrate(&mut current).is_empty());
+        assert!(current.wake.enabled, "a deliberate choice must survive");
     }
 
     #[test]
