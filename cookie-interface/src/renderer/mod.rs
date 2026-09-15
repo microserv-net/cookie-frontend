@@ -127,6 +127,13 @@ struct OrbApp {
     director: AnimationDirector,
     state_rx: tokio::sync::watch::Receiver<VoiceState>,
     features_rx: tokio::sync::watch::Receiver<AudioFeatures>,
+    /// Discrete events, drained each frame. The orb needs to know when
+    /// somebody is *speaking*, which is an event rather than a state.
+    events: tokio::sync::broadcast::Receiver<crate::events::EventEnvelope>,
+    /// True between speech starting and speech ending.
+    hearing_speech: bool,
+    /// True while Cookie is being spoken to — that is, after her name.
+    awake: bool,
     last_frame: Instant,
     last_present: Instant,
     presence: Presence,
@@ -153,6 +160,9 @@ impl OrbApp {
         Self {
             state_rx: engine.bus().state(),
             features_rx: engine.bus().features(),
+            events: engine.bus().subscribe(),
+            hearing_speech: false,
+            awake: false,
             presence: Presence::new(config.ui.visibility.when_idle),
             director,
             engine,
@@ -258,11 +268,53 @@ impl OrbApp {
         Some(smoothed)
     }
 
+    /// Drain the event stream, noting anything the orb reacts to.
+    ///
+    /// Non-blocking by construction: a renderer that waits on an event is a
+    /// renderer that drops frames.
+    fn absorb_events(&mut self) {
+        use crate::events::VoiceEvent;
+        use tokio::sync::broadcast::error::TryRecvError;
+
+        loop {
+            match self.events.try_recv() {
+                Ok(envelope) => match envelope.event {
+                    VoiceEvent::SpeechDetected { .. } => self.hearing_speech = true,
+                    VoiceEvent::SpeechEnded { .. } | VoiceEvent::ListeningStopped { .. } => {
+                        self.hearing_speech = false;
+                    }
+                    VoiceEvent::Attention { awake, .. } => self.awake = awake,
+                    _ => {}
+                },
+                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => return,
+                Err(TryRecvError::Lagged(_)) => {
+                    // Too far behind to know what was missed. Assume the
+                    // quieter of the two possibilities: an orb that fails to
+                    // appear is a smaller fault than one that will not leave.
+                    self.hearing_speech = false;
+                    self.awake = false;
+                }
+            }
+        }
+    }
+
     /// Whether anything currently justifies being on screen.
+    ///
+    /// The rule: the orb is absent until there is a reason, and the microphone
+    /// being open is not a reason. It appears when you speak, when Cookie
+    /// speaks, when she is working on something you asked for, and when
+    /// something has gone wrong.
     fn wants_presence(&self) -> bool {
         let visibility = &self.config.ui.visibility;
-        let state = *self.state_rx.borrow();
-        if visibility.wants(state) {
+        // Speaking near an open microphone is not the same as speaking *to*
+        // her. Until she has been called, the orb stays away.
+        if visibility.when_hearing_speech && self.hearing_speech && self.awake {
+            return true;
+        }
+        if self.awake {
+            return true;
+        }
+        if visibility.wants(*self.state_rx.borrow()) {
             return true;
         }
         // Backend work counts even when the voice pipeline is idle: that is
@@ -285,6 +337,7 @@ impl OrbApp {
         let dt = (now - self.last_frame).as_secs_f32().min(0.1);
         self.last_frame = now;
 
+        self.absorb_events();
         let visible = self
             .presence
             .update(self.wants_presence(), dt, &self.config.ui.visibility);
@@ -471,12 +524,38 @@ mod tests {
     }
 
     #[test]
-    fn idle_is_invisible_by_default_but_working_is_not() {
+    fn an_open_microphone_is_not_a_reason_to_be_on_screen() {
+        // The rule, three times broken: the orb is absent until there is a
+        // reason, and the microphone is open from the moment the application
+        // starts. "Listening" is a state that lasts all day; speaking is an
+        // event, and the event is what the orb responds to.
         let config = VisibilityConfig::default();
         assert!(!config.wants(VoiceState::Idle));
-        assert!(config.wants(VoiceState::Listening));
+        assert!(
+            !config.wants(VoiceState::Listening),
+            "an open microphone must not summon the orb"
+        );
+        assert!(config.when_hearing_speech, "speaking must");
         assert!(config.wants(VoiceState::Processing));
         assert!(config.wants(VoiceState::Speaking));
         assert!(config.wants(VoiceState::Error));
+    }
+
+    #[test]
+    fn the_orb_is_smaller_than_the_pointer_it_sits_beside() {
+        // A macOS arrow is about 20 points tall. The window is a little
+        // larger than the orb so the glow fades out inside it rather than
+        // being clipped at the edge — a clip is a straight line, and a
+        // straight line is a visible boundary.
+        let ui = crate::config::UiConfig::default();
+        assert!(
+            ui.width <= 28 && ui.height <= 28,
+            "{}x{}",
+            ui.width,
+            ui.height
+        );
+        // And it sits to the right of the pointer, level with its tip.
+        assert!(ui.cursor_offset[0] > 0.0);
+        assert!(ui.cursor_offset[1].abs() < 6.0);
     }
 }

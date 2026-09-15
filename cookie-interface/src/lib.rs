@@ -39,6 +39,7 @@ pub mod testmode;
 pub mod tools;
 pub mod tts;
 pub mod util;
+pub mod wake;
 
 pub use config::Config;
 pub use error::{Error, Result};

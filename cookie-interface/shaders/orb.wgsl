@@ -162,7 +162,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     uv = uv - vec2<f32>(orb.e.y, orb.e.z);
     uv = rotate(uv, orb.e.w);
 
-    let radius = orb.a.y * 0.62;
+    // The body occupies half the window; the rest is room for the glow to
+    // fade out inside, so nothing is ever clipped at the window edge — a clip
+    // is a straight line, and a straight line is a visible boundary.
+    let radius = orb.a.y * 0.44;
     let distortion = orb.e.x;
     let energy = orb.f.x;
     let onset = orb.g.x;
@@ -216,13 +219,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var alpha = clamp(accum * 1.15 + bloom * 0.6, 0.0, 1.0) * orb.c.z;
 
-    // The glow decays exponentially and never quite reaches zero, and a
-    // window-sized rectangle of alpha 0.01 is a visible square on a dark
-    // desktop. It has to be cut off — but cutting it off at a fixed radius is
-    // what drew a ring around the orb, because the cut itself has an edge.
-    // Fading on the *alpha* instead means the boundary follows the shape of
-    // the light rather than a circle laid over it.
-    alpha = alpha * smoothstep(0.02, 0.14, alpha);
+    // The glow decays exponentially and never reaches zero, so a
+    // window-sized rectangle of alpha 0.01 would be a visible square on a
+    // dark desktop. Two previous attempts to remove it both drew a ring
+    // instead: cutting at a fixed radius puts an edge at that radius, and
+    // smoothstepping the alpha puts an edge wherever the alpha crosses the
+    // threshold. Any threshold has a contour.
+    //
+    // So: no threshold. Cubing is monotonic and has no knee — 0.9 stays 0.73,
+    // 0.05 becomes 0.000125, which is nothing — and a gaussian keeps the far
+    // corners at exactly zero without a boundary of its own.
+    alpha = alpha * alpha * alpha;
+    alpha = alpha * exp(-dist * dist * 3.0);
 
     // Keep a whisper of the background tint when the window is opaque.
     alpha = max(alpha, orb.g.w);

@@ -207,7 +207,14 @@ fn real_main(cli: Cli) -> Result<()> {
 
     if cli.transcriber {
         runtime.spawn(print_transcripts(engine.clone()));
-        println!("  transcribing to this terminal; speak when you are ready");
+        if config.wake.enabled {
+            println!(
+                "  transcribing to this terminal; say \"{}\" to get her attention",
+                config.wake.word
+            );
+        } else {
+            println!("  transcribing to this terminal; speak when you are ready");
+        }
     }
 
     // The API server runs for as long as the process does.
@@ -278,6 +285,17 @@ async fn print_transcripts(engine: Engine) {
         match envelope.event {
             VoiceEvent::SpeechDetected { level_db } => {
                 println!("  ♪ speech at {level_db:.0} dB");
+            }
+            VoiceEvent::Attention { awake, source } => {
+                println!(
+                    "  {} {}",
+                    if awake { "◉" } else { "○" },
+                    if awake {
+                        format!("listening to you ({source})")
+                    } else {
+                        format!("no longer listening ({source})")
+                    }
+                );
             }
             VoiceEvent::SpeechEnded { duration_ms } => {
                 println!("  … {duration_ms} ms of speech, transcribing");

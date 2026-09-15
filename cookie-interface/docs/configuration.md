@@ -53,6 +53,32 @@ preroll_ms = 300       # kept so the first syllable survives
 min_utterance_ms = 250 # judged on voiced audio, not buffer length
 ```
 
+## `[wake]`
+
+```toml
+[wake]
+enabled = true        # act only on what is addressed to her
+word = "cookie"
+attention_secs = 20   # follow-ups need no name; lapses on its own
+acknowledge = false   # say "Yes?" when called; the orb usually says it better
+```
+
+The microphone is open all the time, which is not the same as Cookie
+listening to you. Everything heard is transcribed — the only way to know
+whether her name was said is to hear what was said — and until she is called,
+that is where it stops: nothing is emitted, nothing reaches the backend, and
+the orb does not appear.
+
+Matching tolerates two edits on a name of six letters or more, because a
+kitchen microphone renders "Cookie" as "cooky", "cookey" and "cook he", and a
+wake word that only works when enunciated is one people stop using. The name
+must appear in the first three words, so "I left the last cookie on the
+counter" is not a summons.
+
+`POST /v1/listen` and `POST /v1/audio` wake her too. Somebody who went to the
+trouble of calling the API is addressing her, and should not have to say her
+name into their own microphone as well.
+
 ## `[stt]` and `[tts]`
 
 See [models.md](models.md). The voice:
@@ -97,7 +123,10 @@ unfocused_fps = 30
 
 [ui.visibility]
 when_idle = false          # the setting that decides presence vs clutter
-when_listening = true
+when_listening = false     # "the microphone is open" is true from startup,
+                           # so this meant "always", which is what the orb
+                           # must never be
+when_hearing_speech = true # appears when you speak *to her*, after her name
 when_working = true
 when_speaking = true
 when_error = true

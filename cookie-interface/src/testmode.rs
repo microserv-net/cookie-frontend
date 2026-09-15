@@ -78,6 +78,8 @@ pub async fn run(engine: &Engine) -> Result<TestOutcome> {
     }
 
     println!("  2/5  listening — say your name");
+    // `StartListening` also wakes her, so the check does not require saying
+    // "Cookie" into your own diagnostic.
     engine
         .send(Command::StartListening {
             continuous: false,

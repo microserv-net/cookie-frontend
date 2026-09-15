@@ -54,6 +54,7 @@ use crate::stt::{SharedRecognizer, TranscribeOptions, Transcript};
 use crate::tasks::TaskRegistry;
 use crate::tts::SharedSynthesizer;
 use crate::util::text::SentenceChunker;
+use crate::wake::{Heard, WakeGate};
 use crate::VoiceState;
 
 /// Audio devices the engine should use.
@@ -398,6 +399,8 @@ struct Worker {
     tasks: Arc<TaskRegistry>,
     status: Arc<Mutex<LiveStatus>>,
     intents: IntentEngine,
+    /// Whether anything heard is meant for Cookie. See [`crate::wake`].
+    wake: WakeGate,
     last_sweep: Instant,
     shutdown: bool,
 }
@@ -450,6 +453,7 @@ impl Worker {
             tasks,
             status,
             intents: IntentEngine::default(),
+            wake: WakeGate::new(config.wake.clone()),
             last_sweep: Instant::now(),
             config,
             paths,
@@ -508,6 +512,12 @@ impl Worker {
         if self.capture.is_none() && self.speaking.is_none() {
             let features = self.analyzer.decay_only();
             self.bus.publish_features(features);
+        }
+        if self.wake.tick() {
+            self.bus.emit(VoiceEvent::Attention {
+                awake: false,
+                source: "timeout".into(),
+            });
         }
         self.maybe_sweep();
     }
@@ -762,9 +772,22 @@ impl Worker {
                 source,
             } => self.interrupt(utterance_id, &source),
             Command::StartListening { continuous, source } => {
+                // Asking her to listen is asking for her attention: a caller
+                // who went to the trouble should not also have to say her
+                // name into their own microphone.
+                self.wake.wake();
+                self.bus.emit(VoiceEvent::Attention {
+                    awake: true,
+                    source: source.clone(),
+                });
                 self.start_listening(source, continuous)
             }
             Command::StopListening { source } => {
+                self.wake.sleep();
+                self.bus.emit(VoiceEvent::Attention {
+                    awake: false,
+                    source: "dismissed".into(),
+                });
                 if self.capture.is_some() {
                     self.stop_capture(&source);
                 }
@@ -772,7 +795,11 @@ impl Worker {
             Command::PushAudio { samples } => {
                 // Audio injected over the API: transcribed directly, bypassing
                 // the VAD, because the caller already decided where the
-                // utterance starts and ends.
+                // utterance starts and ends — and, for the same reason,
+                // bypassing the wake word. Somebody who posts audio to
+                // /v1/audio is addressing her; requiring them to say her name
+                // inside it would be absurd.
+                self.wake.wake();
                 let audio = AudioBuffer::mono(samples, self.config.audio.sample_rate);
                 let ms = audio.duration_ms();
                 self.apply(Trigger::SpeechEnded);
@@ -847,6 +874,11 @@ impl Worker {
             return;
         }
         if interim {
+            // A partial from somebody who has not called her would put words
+            // on screen that were never addressed to her.
+            if !self.wake.is_awake() {
+                return;
+            }
             self.bus.emit(VoiceEvent::TranscriptPartial {
                 utterance_id,
                 text: transcript.text,
@@ -856,16 +888,48 @@ impl Worker {
             });
             return;
         }
+        // Everything heard is transcribed, because the only way to know
+        // whether her name was said is to hear what was said. What is *done*
+        // with it is another matter: until she is called, this is where it
+        // stops — nothing is emitted, nothing reaches the backend, and the
+        // orb never appears.
+        let was_awake = self.wake.is_awake();
+        let text = match self.wake.consider(&transcript.text) {
+            Heard::Ignore => {
+                tracing::debug!("not addressed to Cookie; ignored");
+                self.apply(Trigger::RecognitionFinished);
+                return;
+            }
+            Heard::Woken => {
+                self.bus.emit(VoiceEvent::Attention {
+                    awake: true,
+                    source: "wake-word".into(),
+                });
+                self.apply(Trigger::RecognitionFinished);
+                if self.config.wake.acknowledge {
+                    self.say("Yes?".to_string());
+                }
+                return;
+            }
+            Heard::Act(text) => text,
+        };
+        if !was_awake {
+            self.bus.emit(VoiceEvent::Attention {
+                awake: true,
+                source: "wake-word".into(),
+            });
+        }
+
         self.bus.emit(VoiceEvent::TranscriptFinal {
             utterance_id: utterance_id.clone(),
-            text: transcript.text.clone(),
+            text: text.clone(),
             confidence: transcript.confidence,
             language: transcript.language.clone(),
             duration_ms: transcript.audio_ms,
             segments: transcript.segments.clone(),
         });
         self.apply(Trigger::RecognitionFinished);
-        self.route_transcript(utterance_id, transcript.text);
+        self.route_transcript(utterance_id, text);
     }
 
     /// Decide what a finished transcript is *for*.

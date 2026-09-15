@@ -34,6 +34,8 @@ pub struct LocalRecognizer {
     language: Option<String>,
     threads: u32,
     timeout_ms: u64,
+    /// `cpu`, `coreml`, `cuda`… Whatever the runtime was built with.
+    provider: String,
 }
 
 impl LocalRecognizer {
@@ -73,6 +75,12 @@ impl LocalRecognizer {
             // takes seconds even on fast hardware. A timeout tuned to steady
             // state kills the very first thing you say.
             timeout_ms: cfg.timeout_ms.max(120_000),
+            provider: cfg
+                .options
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(default_provider),
         };
         recognizer.check_files()?;
         Ok(recognizer)
@@ -107,6 +115,20 @@ impl LocalRecognizer {
             "sherpa-onnx-offline"
         };
         self.runtime.join("bin").join(name)
+    }
+}
+
+/// The fastest execution provider this platform is likely to have.
+///
+/// CoreML on Apple hardware, where it moves Whisper onto the Neural Engine
+/// and is worth several times the CPU. It is a request rather than a
+/// guarantee — a runtime built without it says so and we fall back — which is
+/// why this is a default rather than an assumption.
+fn default_provider() -> String {
+    if cfg!(target_os = "macos") {
+        "coreml".into()
+    } else {
+        "cpu".into()
     }
 }
 
@@ -207,60 +229,20 @@ impl SpeechRecognizer for LocalRecognizer {
             .map_err(|e| Error::Stt(e.to_string()))?;
             written?;
 
-            let mut command = tokio::process::Command::new(self.program());
-            command
-                .arg(format!("--whisper-encoder={}", self.encoder.display()))
-                .arg(format!("--whisper-decoder={}", self.decoder.display()))
-                .arg(format!("--tokens={}", self.tokens.display()))
-                .arg(format!("--num-threads={}", self.threads))
-                .arg("--whisper-task=transcribe");
-            if let Some(language) = options.language.as_deref().or(self.language.as_deref()) {
-                command.arg(format!(
-                    "--whisper-language={}",
-                    language.split('-').next().unwrap_or("en")
-                ));
+            let mut attempt = self.run(&wav, &options, &self.provider).await;
+            if attempt.is_err() && self.provider != "cpu" {
+                // A runtime built without CoreML fails immediately and
+                // identically every time; falling back once beats failing
+                // forever on a machine that would have worked.
+                tracing::warn!(
+                    provider = %self.provider,
+                    "the recogniser refused that execution provider; using the CPU"
+                );
+                attempt = self.run(&wav, &options, "cpu").await;
             }
-            command
-                .arg(&wav)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            with_library_path(&mut command, &self.runtime);
-
-            let child = command.spawn().map_err(|e| Error::ModelUnavailable {
-                name: self.model.clone(),
-                reason: format!("could not start the recogniser: {e}"),
-            })?;
-            let output = tokio::time::timeout(
-                std::time::Duration::from_millis(self.timeout_ms),
-                child.wait_with_output(),
-            )
-            .await;
             let _ = tokio::fs::remove_file(&wav).await;
+            let text = attempt?;
 
-            let output = match output {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => return Err(Error::Stt(format!("the recogniser failed: {e}"))),
-                Err(_) => {
-                    return Err(Error::Stt(format!(
-                        "the recogniser took longer than {}ms and was stopped",
-                        self.timeout_ms
-                    )))
-                }
-            };
-            if !output.status.success() {
-                return Err(Error::Stt(format!(
-                    "the recogniser exited with {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                        .lines()
-                        .last()
-                        .unwrap_or_default()
-                )));
-            }
-
-            let text = parse_output(&String::from_utf8_lossy(&output.stdout));
             Ok(Transcript {
                 is_final: !options.interim,
                 confidence: None,
@@ -271,6 +253,71 @@ impl SpeechRecognizer for LocalRecognizer {
                 text,
             })
         })
+    }
+}
+
+impl LocalRecognizer {
+    /// One invocation of the recogniser with a given execution provider.
+    async fn run(
+        &self,
+        wav: &std::path::Path,
+        options: &TranscribeOptions,
+        provider: &str,
+    ) -> Result<String> {
+        let mut command = tokio::process::Command::new(self.program());
+        command
+            .arg(format!("--provider={provider}"))
+            .arg(format!("--whisper-encoder={}", self.encoder.display()))
+            .arg(format!("--whisper-decoder={}", self.decoder.display()))
+            .arg(format!("--tokens={}", self.tokens.display()))
+            .arg(format!("--num-threads={}", self.threads))
+            .arg("--whisper-task=transcribe");
+        if let Some(language) = options.language.as_deref().or(self.language.as_deref()) {
+            command.arg(format!(
+                "--whisper-language={}",
+                language.split('-').next().unwrap_or("en")
+            ));
+        }
+        command
+            .arg(wav)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        with_library_path(&mut command, &self.runtime);
+
+        let child = command.spawn().map_err(|e| Error::ModelUnavailable {
+            name: self.model.clone(),
+            reason: format!("could not start the recogniser: {e}"),
+        })?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_millis(self.timeout_ms),
+            child.wait_with_output(),
+        )
+        .await;
+
+        let output = match output {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(Error::Stt(format!("the recogniser failed: {e}"))),
+            Err(_) => {
+                return Err(Error::Stt(format!(
+                    "the recogniser took longer than {}ms and was stopped",
+                    self.timeout_ms
+                )))
+            }
+        };
+        if !output.status.success() {
+            return Err(Error::Stt(format!(
+                "the recogniser exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or_default()
+            )));
+        }
+
+        Ok(parse_output(&String::from_utf8_lossy(&output.stdout)))
     }
 }
 

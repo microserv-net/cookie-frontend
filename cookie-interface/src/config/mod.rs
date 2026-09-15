@@ -42,6 +42,8 @@ pub struct Config {
     pub backend: BackendConfig,
     /// What Cookie may do on this machine, and when she asks first.
     pub tools: ToolsConfig,
+    /// When Cookie is being spoken to, as opposed to merely listening.
+    pub wake: WakeConfig,
     pub audio: AudioConfig,
     pub vad: VadConfig,
     pub stt: SttConfig,
@@ -58,6 +60,7 @@ impl Default for Config {
             api: ApiConfig::default(),
             backend: BackendConfig::default(),
             tools: ToolsConfig::default(),
+            wake: WakeConfig::default(),
             audio: AudioConfig::default(),
             vad: VadConfig::default(),
             stt: SttConfig::default(),
@@ -576,13 +579,17 @@ impl Default for UiConfig {
             // beside: the orb itself is about twenty points across, a little
             // smaller than the arrow. The window is wider than the orb
             // because the glow needs somewhere to fall off.
-            width: 34,
-            height: 34,
+            // The macOS pointer is about twenty points across, and this is
+            // measured against it: a 22-point window with the body filling
+            // rather less than half of it, so the orb reads as a bead beside
+            // the arrow rather than a bubble behind it.
+            width: 22,
+            height: 22,
             dock_corner: DockCorner::BottomRight,
             // To the right of the arrow and level with it: the pointer's hot
             // spot is its top-left corner, so anything below reads as
             // detached, and anything to the left sits under the hand.
-            cursor_offset: [20.0, 0.0],
+            cursor_offset: [18.0, 2.0],
             visibility: VisibilityConfig::default(),
             cursor_follow_lag: 0.0,
             target_fps: 60,
@@ -700,8 +707,17 @@ pub struct VisibilityConfig {
     /// Show while idle. Off by default — this is the setting that decides
     /// whether Cookie is a presence or a permanent fixture.
     pub when_idle: bool,
-    /// Show while the microphone is open and she is listening to you.
+    /// Show merely because the microphone is open.
+    ///
+    /// Off, and this is the setting that was wrong: the microphone is open
+    /// from the moment the application starts, so "show while listening"
+    /// meant "show always", which is exactly what the orb must not do.
     pub when_listening: bool,
+    /// Show while you are actually speaking.
+    ///
+    /// This is the one that matters. The orb appears when you start talking
+    /// and leaves when you stop — it is a response to you, not a fixture.
+    pub when_hearing_speech: bool,
     /// Show while a request is being worked on, locally or by the backend.
     pub when_working: bool,
     /// Show while she is speaking.
@@ -723,7 +739,8 @@ impl Default for VisibilityConfig {
     fn default() -> Self {
         Self {
             when_idle: false,
-            when_listening: true,
+            when_listening: false,
+            when_hearing_speech: true,
             when_working: true,
             when_speaking: true,
             when_error: true,
@@ -736,6 +753,12 @@ impl Default for VisibilityConfig {
 
 impl VisibilityConfig {
     /// Whether a given voice state is a reason to be on screen.
+    /// Whether a state on its own is a reason to be on screen.
+    ///
+    /// Note what is absent: hearing speech is not a state, it is an event,
+    /// and the renderer tracks it separately. A state machine that is
+    /// "Listening" for eight hours says nothing about whether anybody is
+    /// talking.
     pub fn wants(&self, state: crate::state::VoiceState) -> bool {
         use crate::state::VoiceState::*;
         match state {
@@ -745,6 +768,44 @@ impl VisibilityConfig {
             Speaking => self.when_speaking,
             Interrupted => self.when_speaking || self.when_idle,
             Error => self.when_error,
+        }
+    }
+}
+
+/// The wake word.
+///
+/// The microphone is open all the time; this is what decides whether anything
+/// heard is meant for Cookie. Until she is called, transcripts are checked for
+/// her name and discarded — nothing is emitted, nothing reaches the backend,
+/// and the orb does not appear.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WakeConfig {
+    /// Require the name before acting on anything.
+    ///
+    /// On by default. An assistant that acts on whatever it overhears is not
+    /// an assistant you leave running.
+    pub enabled: bool,
+    /// What to call her.
+    pub word: String,
+    /// How long she stays attentive after being called, in seconds.
+    ///
+    /// Long enough for a follow-up sentence without repeating the name, short
+    /// enough that forgetting to dismiss her is harmless — which matters,
+    /// because forgetting is the normal case.
+    pub attention_secs: u64,
+    /// Say something short when she starts listening, so it is obvious the
+    /// name was heard. The orb appearing usually says it better.
+    pub acknowledge: bool,
+}
+
+impl Default for WakeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            word: "cookie".into(),
+            attention_secs: 20,
+            acknowledge: false,
         }
     }
 }

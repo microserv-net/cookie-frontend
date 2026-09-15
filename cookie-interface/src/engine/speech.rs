@@ -35,6 +35,17 @@ use super::Internal;
 /// immediately, long enough that we are not waking up constantly.
 const PIECE_MS: u64 = 120;
 
+/// How far ahead of the analyser the speaker is kept.
+///
+/// The analyser walks the audio at wall-clock speed to publish features, and
+/// `sleep(20ms)` always sleeps a little *more* than 20ms. Writing the next
+/// piece only after finishing the previous walk therefore let that drift
+/// accumulate until the speaker ran dry between pieces — which is what made
+/// the voice sound broken up. Keeping a third of a second in hand absorbs the
+/// drift, and barge-in still cuts within a frame because `clear()` empties
+/// the queue rather than waiting for it.
+const LEAD_MS: u64 = 320;
+
 /// One unit of speech work.
 pub(crate) struct SpeechTask {
     pub(crate) utterance_id: String,
@@ -177,31 +188,48 @@ impl SpeechTask {
         let piece = ((rate * PIECE_MS) / 1000).max(1) as usize;
         let frame = ((rate * self.frame_ms) / 1000).max(1) as usize;
 
-        for part in chunk.samples.chunks(piece) {
+        let mut written = 0usize;
+        let mut analysed = 0usize;
+
+        while analysed < chunk.samples.len() {
             if self.cancelled() {
                 return false;
             }
-            {
-                // Short, `await`-free critical section: the guard never
-                // crosses a suspension point.
-                let mut playback = match self.playback.lock() {
-                    Ok(p) => p,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                playback.write(part, chunk.sample_rate);
-            }
-            // Walk the piece at wall-clock speed, publishing what the user is
-            // hearing right now.
-            for window in part.chunks(frame) {
-                if self.cancelled() {
-                    return false;
+
+            // Keep the speaker ahead of the analyser. Everything is written
+            // eventually; this only decides how early.
+            while written < chunk.samples.len() && self.queued_ms() < LEAD_MS {
+                let end = (written + piece).min(chunk.samples.len());
+                {
+                    // Short, `await`-free critical section: the guard never
+                    // crosses a suspension point.
+                    let mut playback = match self.playback.lock() {
+                        Ok(p) => p,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    playback.write(&chunk.samples[written..end], chunk.sample_rate);
                 }
-                let features = analyzer.process(window);
-                self.bus.publish_features(features);
-                tokio::time::sleep(Duration::from_millis(self.frame_ms)).await;
+                written = end;
             }
+
+            // Walk the audio at wall-clock speed, publishing what the user is
+            // hearing right now.
+            let end = (analysed + frame).min(chunk.samples.len());
+            let features = analyzer.process(&chunk.samples[analysed..end]);
+            self.bus.publish_features(features);
+            analysed = end;
+            tokio::time::sleep(Duration::from_millis(self.frame_ms)).await;
         }
         true
+    }
+
+    /// Milliseconds of audio the speaker still has in hand.
+    fn queued_ms(&self) -> u64 {
+        let playback = match self.playback.lock() {
+            Ok(p) => p,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        playback.queued_ms()
     }
 
     /// Wait for queued audio to finish playing, with a ceiling so a stuck

@@ -193,6 +193,18 @@ pub enum VoiceEvent {
         detail: Option<String>,
     },
 
+    /// Cookie started or stopped being spoken to.
+    ///
+    /// Distinct from listening, which is whether the microphone is open —
+    /// that is true from startup and says nothing about whether anybody is
+    /// talking to her.
+    #[serde(rename = "attention")]
+    Attention {
+        awake: bool,
+        /// `wake-word`, `api`, `timeout`, `dismissed`.
+        source: String,
+    },
+
     /// A diagnostics run finished.
     #[serde(rename = "diagnostics")]
     Diagnostics {
@@ -241,6 +253,7 @@ impl VoiceEvent {
             VoiceEvent::ProviderStatus { .. } => "provider.status",
             VoiceEvent::Task { .. } => "task",
             VoiceEvent::Tool { .. } => "tool",
+            VoiceEvent::Attention { .. } => "attention",
             VoiceEvent::Intent { .. } => "intent",
             VoiceEvent::Diagnostics { .. } => "diagnostics",
             VoiceEvent::RetentionSwept { .. } => "retention.swept",
