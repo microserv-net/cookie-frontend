@@ -162,10 +162,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     uv = uv - vec2<f32>(orb.e.y, orb.e.z);
     uv = rotate(uv, orb.e.w);
 
-    // The body occupies half the window; the rest is room for the glow to
-    // fade out inside, so nothing is ever clipped at the window edge — a clip
-    // is a straight line, and a straight line is a visible boundary.
-    let radius = orb.a.y * 0.44;
+    // The body occupies well under half the window; the rest is room for the
+    // glow to fade out inside, so nothing is ever clipped at the window edge —
+    // a clip is a straight line, and a straight line is a visible boundary.
+    let radius = orb.a.y * 0.34;
     let distortion = orb.e.x;
     let energy = orb.f.x;
     let onset = orb.g.x;
@@ -200,8 +200,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Outer bloom, independent of the marched body so the glow survives even
     // when the body is thin. Tight on purpose: a wide bloom on a small orb
     // reads as a halo drawn around it rather than as light coming off it.
-    let glow_amount = orb.c.x * (0.35 + energy * 0.4 + onset * 0.3);
-    let bloom = exp(-max(dist - edge * 0.9, 0.0) * 16.0) * glow_amount;
+    // Wide enough to read as light coming off the body, tight enough that it
+    // is gone before the window edge.
+    let glow_amount = orb.c.x * (0.8 + energy * 0.7 + onset * 0.5);
+    let bloom = exp(-max(dist - edge, 0.0) * 5.5) * glow_amount;
 
     // Colour: hue travels from the core outward, so the entity has depth
     // rather than being one flat purple.
@@ -221,16 +223,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // The glow decays exponentially and never reaches zero, so a
     // window-sized rectangle of alpha 0.01 would be a visible square on a
-    // dark desktop. Two previous attempts to remove it both drew a ring
-    // instead: cutting at a fixed radius puts an edge at that radius, and
-    // smoothstepping the alpha puts an edge wherever the alpha crosses the
-    // threshold. Any threshold has a contour.
+    // dark desktop. Three attempts to remove it went wrong in three ways: a
+    // fixed radius puts an edge at that radius; smoothstepping the alpha puts
+    // an edge wherever it crosses the threshold; and cubing, which has no
+    // edge at all, took the glow with it — 0.3 became 0.027, so everything
+    // but the core vanished.
     //
-    // So: no threshold. Cubing is monotonic and has no knee — 0.9 stays 0.73,
-    // 0.05 becomes 0.000125, which is nothing — and a gaussian keeps the far
-    // corners at exactly zero without a boundary of its own.
-    alpha = alpha * alpha * alpha;
-    alpha = alpha * exp(-dist * dist * 3.0);
+    // What works is a *linear* floor. Subtracting a constant has the same
+    // slope everywhere, so it cannot draw a contour, and it removes only the
+    // haze: 0.02 becomes nothing, 0.6 stays 0.59. The gaussian then takes the
+    // corners to zero over the whole window rather than at any particular
+    // radius.
+    alpha = max(alpha - 0.035, 0.0) / 0.965;
+    alpha = alpha * exp(-dist * dist * 1.8);
 
     // Keep a whisper of the background tint when the window is opaque.
     alpha = max(alpha, orb.g.w);

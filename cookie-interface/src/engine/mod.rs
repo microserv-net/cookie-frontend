@@ -896,7 +896,10 @@ impl Worker {
         let was_awake = self.wake.is_awake();
         let text = match self.wake.consider(&transcript.text) {
             Heard::Ignore => {
-                tracing::debug!("not addressed to Cookie; ignored");
+                self.bus.emit(VoiceEvent::Ignored {
+                    text: transcript.text.clone(),
+                    reason: format!("not addressed to {}", self.config.wake.word),
+                });
                 self.apply(Trigger::RecognitionFinished);
                 return;
             }

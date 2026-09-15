@@ -327,7 +327,7 @@ impl Default for VadConfig {
             // Above the adaptive noise floor. Nine was too eager: a quiet room
             // on a laptop microphone drifts by that much, and the result was
             // "speech detected" at -45 dB with nobody talking.
-            threshold_db: 14.0,
+            threshold_db: 11.0,
             // Long enough that a keyboard clack or a chair creak cannot open
             // an utterance on its own.
             speech_ms: 200,
@@ -336,7 +336,7 @@ impl Default for VadConfig {
             max_utterance_ms: 30_000,
             // Judged on voiced audio only. Anything shorter than this is a
             // noise, not a sentence.
-            min_utterance_ms: 450,
+            min_utterance_ms: 350,
         }
     }
 }
@@ -579,17 +579,19 @@ impl Default for UiConfig {
             // beside: the orb itself is about twenty points across, a little
             // smaller than the arrow. The window is wider than the orb
             // because the glow needs somewhere to fall off.
-            // The macOS pointer is about twenty points across, and this is
-            // measured against it: a 22-point window with the body filling
-            // rather less than half of it, so the orb reads as a bead beside
-            // the arrow rather than a bubble behind it.
-            width: 22,
-            height: 22,
+            // The macOS arrow is about sixteen points wide. The body works
+            // out at roughly twelve across, which is smaller than the
+            // pointer; the window is wider than the body because the glow has
+            // to fade out *inside* it, and a window this small is still only
+            // a handful of pixels of compositing.
+            width: 40,
+            height: 40,
             dock_corner: DockCorner::BottomRight,
             // To the right of the arrow and level with it: the pointer's hot
             // spot is its top-left corner, so anything below reads as
             // detached, and anything to the left sits under the hand.
-            cursor_offset: [18.0, 2.0],
+            // Measured from the window's centre to the pointer's hot spot.
+            cursor_offset: [16.0, 2.0],
             visibility: VisibilityConfig::default(),
             cursor_follow_lag: 0.0,
             target_fps: 60,
@@ -628,10 +630,10 @@ impl Default for ThemeConfig {
             // Well below one. Above it the shader saturates and the brown
             // washes out to white, which is what made it look like a lamp
             // rather than a small warm thing.
-            intensity: 0.62,
+            intensity: 0.78,
             background_alpha: 0.0,
             // Enough to look lit from within, not enough to draw a halo.
-            glow: 0.45,
+            glow: 0.7,
         }
     }
 }

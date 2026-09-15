@@ -308,6 +308,12 @@ async fn print_transcripts(engine: Engine) {
             } => {
                 println!("  ▸ {text}   ({duration_ms} ms of audio)");
             }
+            VoiceEvent::Ignored { text, reason } => {
+                // The distinction that matters when nothing seems to work:
+                // this is recognition succeeding and the wake word declining,
+                // not recognition failing.
+                println!("  · heard \"{text}\" — {reason}");
+            }
             VoiceEvent::Error { message, hint, .. } => {
                 println!("  ! {message}");
                 if let Some(hint) = hint {

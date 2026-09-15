@@ -24,7 +24,17 @@ use crate::retention::RetentionManager;
 use crate::util::text::extract_name;
 
 /// How long to wait for the user to say something.
-const LISTEN_TIMEOUT: Duration = Duration::from_secs(20);
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to wait for the recogniser once you have stopped speaking.
+///
+/// Separate from the listening deadline, and much longer, because they are
+/// different questions: the first is "did anybody say anything", the second
+/// is "how long does this machine take". A local Whisper on a cold cache can
+/// take most of a minute for its first utterance, and a check that gives up
+/// at twenty seconds reports "nothing was transcribed" for a machine that was
+/// about to transcribe it perfectly.
+const TRANSCRIBE_TIMEOUT: Duration = Duration::from_secs(150);
 /// How long to wait for a piece of speech to finish playing.
 const SPEAK_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -89,7 +99,7 @@ pub async fn run(engine: &Engine) -> Result<TestOutcome> {
 
     let mut heard = None;
     let mut detected = false;
-    let deadline = tokio::time::Instant::now() + LISTEN_TIMEOUT;
+    let mut deadline = tokio::time::Instant::now() + LISTEN_TIMEOUT;
     while tokio::time::Instant::now() < deadline {
         match timeout(Duration::from_secs(1), events.recv()).await {
             Ok(Ok(envelope)) => match envelope.event {
@@ -98,6 +108,17 @@ pub async fn run(engine: &Engine) -> Result<TestOutcome> {
                         detected = true;
                         println!("  3/5  speech detected at {level_db:.0} dB");
                     }
+                }
+                VoiceEvent::SpeechEnded { duration_ms } => {
+                    println!("       {duration_ms} ms of speech; transcribing…");
+                    // The clock now measures the recogniser, not you.
+                    deadline = tokio::time::Instant::now() + TRANSCRIBE_TIMEOUT;
+                }
+                VoiceEvent::Ignored { text, .. } => {
+                    // The wake word is bypassed for `--test`, so this should
+                    // not happen — but if it does, silence would be the worst
+                    // possible report.
+                    println!("       heard but discarded: {text}");
                 }
                 VoiceEvent::TranscriptPartial { text, .. } => {
                     println!("       … {text}");
@@ -122,9 +143,15 @@ pub async fn run(engine: &Engine) -> Result<TestOutcome> {
         .await;
 
     let Some(transcript) = heard.clone() else {
-        return Err(Error::Stt(
-            "nothing was transcribed. Check your microphone with `--doctor`.".into(),
-        ));
+        return Err(Error::Stt(if detected {
+            "your speech was heard but never transcribed. The recogniser may \
+             still be loading — try again, and check `--doctor`."
+                .into()
+        } else {
+            "nothing was heard at all. Check the microphone with `--doctor`, \
+             and that the input level is not muted."
+                .to_string()
+        }));
     };
 
     // A stand-in provider produces a transcript that is not a transcription.

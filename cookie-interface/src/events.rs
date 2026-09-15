@@ -193,6 +193,15 @@ pub enum VoiceEvent {
         detail: Option<String>,
     },
 
+    /// Something was heard, transcribed, and discarded because it was not
+    /// addressed to Cookie.
+    ///
+    /// Emitted so that "she is not hearing me" and "she heard me and decided
+    /// it was not for her" are distinguishable, which they are not otherwise.
+    /// Carries the text, so it counts as sensitive.
+    #[serde(rename = "ignored")]
+    Ignored { text: String, reason: String },
+
     /// Cookie started or stopped being spoken to.
     ///
     /// Distinct from listening, which is whether the microphone is open —
@@ -254,6 +263,7 @@ impl VoiceEvent {
             VoiceEvent::Task { .. } => "task",
             VoiceEvent::Tool { .. } => "tool",
             VoiceEvent::Attention { .. } => "attention",
+            VoiceEvent::Ignored { .. } => "ignored",
             VoiceEvent::Intent { .. } => "intent",
             VoiceEvent::Diagnostics { .. } => "diagnostics",
             VoiceEvent::RetentionSwept { .. } => "retention.swept",
