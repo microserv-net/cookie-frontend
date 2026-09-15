@@ -308,6 +308,18 @@ async fn print_transcripts(engine: Engine) {
             } => {
                 println!("  ▸ {text}   ({duration_ms} ms of audio)");
             }
+            VoiceEvent::Timing {
+                what,
+                elapsed_ms,
+                detail,
+            } => {
+                // The number that decides whether the recogniser needs a
+                // different execution provider or a different model.
+                println!(
+                    "  ⧗ {what} took {elapsed_ms} ms{}",
+                    detail.map(|d| format!(" [{d}]")).unwrap_or_default()
+                );
+            }
             VoiceEvent::Ignored { text, reason } => {
                 // The distinction that matters when nothing seems to work:
                 // this is recognition succeeding and the wake word declining,

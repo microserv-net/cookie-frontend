@@ -223,7 +223,9 @@ const PATTERNS: &[Pattern] = &[
             "standby",
         ],
         keywords: &["sleep", "standby", "dismiss", "away"],
-        blockers: &["wake", "up"],
+        // Not "listening": "stop listening" is the canonical way to dismiss
+        // her. The words here are the ones that appeared in false positives.
+        blockers: &["wake", "up", "raining", "outside", "bro"],
         pairs: &[("stop", "listening"), ("thats", "all")],
         max_words: 7,
     },
@@ -389,7 +391,12 @@ impl Default for IntentEngine {
             // Tuned so that clear control phrases land and ordinary requests
             // ("open the project I was working on") never do.
             backend_threshold: 0.62,
-            standalone_threshold: 0.48,
+            // Was 0.48, on the reasoning that with no backend nothing else
+            // would answer. What actually happened is that "It's raining out
+            // there" scored 0.48 as *sleep* and "Are you listening to me?"
+            // scored 0.54 as *stop speaking*. A missed command costs you
+            // repeating yourself; a false one dismisses her mid-sentence.
+            standalone_threshold: 0.60,
         }
     }
 }
@@ -625,6 +632,27 @@ mod tests {
             infer_in("stop", VoiceState::Processing),
             Some(Intent::CancelTask)
         );
+    }
+
+    #[test]
+    fn ordinary_sentences_are_not_mistaken_for_commands() {
+        // Observed in the field, both below the old standalone threshold and
+        // above nothing: these dismissed her mid-conversation.
+        let engine = IntentEngine::default();
+        for phrase in [
+            "It's raining out there bro",
+            "It's raining outside",
+            "Are you listening to me?",
+            "what is this behavior",
+        ] {
+            assert_eq!(
+                engine
+                    .infer(phrase, VoiceState::Idle, false)
+                    .map(|m| m.intent),
+                None,
+                "{phrase} was taken as a command"
+            );
+        }
     }
 
     #[test]

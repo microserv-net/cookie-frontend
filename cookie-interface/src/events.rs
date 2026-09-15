@@ -202,6 +202,21 @@ pub enum VoiceEvent {
     #[serde(rename = "ignored")]
     Ignored { text: String, reason: String },
 
+    /// How long something took.
+    ///
+    /// Emitted for the steps whose cost is worth knowing — recognition above
+    /// all, because "it feels slow" and "it is taking four seconds on the CPU
+    /// because CoreML was refused" need different things done about them.
+    #[serde(rename = "timing")]
+    Timing {
+        /// `recognition`, `synthesis`.
+        what: String,
+        elapsed_ms: u64,
+        /// Free-form: the execution provider, the model, why it was slow.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+
     /// Cookie started or stopped being spoken to.
     ///
     /// Distinct from listening, which is whether the microphone is open —
@@ -264,6 +279,7 @@ impl VoiceEvent {
             VoiceEvent::Tool { .. } => "tool",
             VoiceEvent::Attention { .. } => "attention",
             VoiceEvent::Ignored { .. } => "ignored",
+            VoiceEvent::Timing { .. } => "timing",
             VoiceEvent::Intent { .. } => "intent",
             VoiceEvent::Diagnostics { .. } => "diagnostics",
             VoiceEvent::RetentionSwept { .. } => "retention.swept",

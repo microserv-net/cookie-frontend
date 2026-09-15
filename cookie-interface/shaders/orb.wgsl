@@ -165,7 +165,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The body occupies well under half the window; the rest is room for the
     // glow to fade out inside, so nothing is ever clipped at the window edge —
     // a clip is a straight line, and a straight line is a visible boundary.
-    let radius = orb.a.y * 0.125;
+    // Roughly three and a half points of *radius* in a 28-point window, so
+    // about seven across — a bead beside the pointer. The window stays much
+    // larger than that because the glow has to reach nothing before the edge.
+    let radius = orb.a.y * 0.25;
     let distortion = orb.e.x;
     let energy = orb.f.x;
     let onset = orb.g.x;

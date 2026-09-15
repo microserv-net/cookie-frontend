@@ -131,16 +131,36 @@ impl LocalRecognizer {
 
 /// The fastest execution provider this platform is likely to have.
 ///
-/// CoreML on Apple hardware, where it moves Whisper onto the Neural Engine
-/// and is worth several times the CPU. It is a request rather than a
-/// guarantee — a runtime built without it says so and we fall back — which is
-/// why this is a default rather than an assumption.
+/// CoreML on Apple hardware, where it moves the encoder onto the Neural
+/// Engine. It is a request rather than a guarantee: onnxruntime silently
+/// falls back to the CPU for operators CoreML cannot take, and a runtime
+/// built without the provider at all refuses outright. Both are handled —
+/// the first invisibly and correctly, the second by remembering and not
+/// asking again.
 fn default_provider() -> String {
     if cfg!(target_os = "macos") {
         "coreml".into()
     } else {
         "cpu".into()
     }
+}
+
+/// Whether the runtime's complaint is about the execution provider.
+///
+/// Distinguishing this from a real failure matters: falling back on a missing
+/// model file would hide the actual problem behind a second, slower attempt
+/// at the same impossible thing.
+fn provider_was_refused(message: &str) -> bool {
+    let message = message.to_lowercase();
+    [
+        "provider",
+        "coreml",
+        "execution",
+        "not compiled",
+        "unsupported",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 /// Half the cores, at least two.
@@ -154,6 +174,18 @@ fn default_threads() -> i64 {
         .map(|n| n.get() as i64)
         .unwrap_or(4);
     (cores / 2).max(2)
+}
+
+/// Where CoreML keeps its compiled models.
+///
+/// Inside the application's own cache directory, so `--clear-cache` clears it
+/// and nothing is left behind on uninstall.
+fn coreml_cache() -> std::path::PathBuf {
+    let directory = crate::paths::Paths::discover()
+        .map(|paths| paths.cache_dir().join("coreml"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("cookie-coreml"));
+    let _ = std::fs::create_dir_all(&directory);
+    directory
 }
 
 /// Point the dynamic loader at the runtime's own libraries.
@@ -248,15 +280,26 @@ impl SpeechRecognizer for LocalRecognizer {
             } else {
                 &self.provider
             };
+            let mut used = preferred.to_string();
             let mut attempt = self.run(&wav, &options, preferred).await;
-            if attempt.is_err() && preferred != "cpu" {
-                tracing::warn!(
-                    provider = %self.provider,
-                    "the recogniser refused that execution provider; using the CPU from now on"
-                );
-                self.fell_back.store(true, Ordering::Relaxed);
-                attempt = self.run(&wav, &options, "cpu").await;
+            if preferred != "cpu" {
+                if let Err(error) = &attempt {
+                    if provider_was_refused(&error.to_string()) {
+                        tracing::warn!(
+                            provider = %self.provider,
+                            "this runtime has no {} support; using the CPU from now on",
+                            self.provider
+                        );
+                        self.fell_back.store(true, Ordering::Relaxed);
+                        used = "cpu".into();
+                        attempt = self.run(&wav, &options, "cpu").await;
+                    }
+                    // Anything else is a real failure, and retrying it on the
+                    // CPU would only take twice as long to report the same
+                    // thing.
+                }
             }
+            tracing::debug!(provider = %used, "transcribed");
             let _ = tokio::fs::remove_file(&wav).await;
             let text = attempt?;
 
@@ -463,6 +506,26 @@ mod tests {
         assert!(!capabilities.timestamps, "sherpa-onnx prints text only");
         assert!(!capabilities.confidence);
         assert_eq!(capabilities.sample_rate, 16_000);
+    }
+
+    #[test]
+    fn only_a_provider_complaint_triggers_the_fallback() {
+        // Retrying a missing model on the CPU would take twice as long to
+        // report the same thing, and hide the real fault behind a slower one.
+        assert!(provider_was_refused(
+            "this build does not support the CoreML execution provider"
+        ));
+        assert!(provider_was_refused("Unsupported provider: coreml"));
+        assert!(!provider_was_refused("the recogniser's encoder is missing"));
+        assert!(!provider_was_refused("No such file or directory"));
+    }
+
+    #[test]
+    fn coreml_gets_a_cache_directory_so_it_compiles_once() {
+        // Without one, onnxruntime recompiles the model on every invocation,
+        // which is slower than never asking for CoreML at all.
+        let cache = coreml_cache();
+        assert!(cache.is_absolute(), "{}", cache.display());
     }
 
     #[test]

@@ -867,8 +867,25 @@ impl Worker {
                 return;
             }
         };
+        if !interim {
+            // Always report the cost, even for an empty result: a recogniser
+            // that takes four seconds to hear nothing and one that takes four
+            // hundred milliseconds are different problems.
+            self.bus.emit(VoiceEvent::Timing {
+                what: "recognition".into(),
+                elapsed_ms: transcript.latency_ms,
+                detail: Some(self.info.stt_provider.clone()),
+            });
+        }
         if transcript.is_empty() {
             if !interim {
+                // Silence here is indistinguishable from a crash. Say that
+                // the audio produced no words, which is a different fault
+                // from producing the wrong ones.
+                self.bus.emit(VoiceEvent::Ignored {
+                    text: String::new(),
+                    reason: "the recogniser found no words in that".into(),
+                });
                 self.apply(Trigger::RecognitionFinished);
             }
             return;
