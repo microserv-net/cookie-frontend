@@ -1,5 +1,54 @@
 # Models
 
+## What `--setup` installs
+
+```bash
+cookie-interface --setup      # about 700 MB, once
+```
+
+| | | |
+|---|---|---|
+| runtime | sherpa-onnx, prebuilt for your platform | 20–45 MB |
+| hearing | `whisper-large-v3-turbo` | 564 MB |
+| voice | Kokoro, British female (`bf_emma`) | 103 MB |
+
+Downloads are checksummed where upstream publishes a digest, written to a
+`.part` file and renamed only when the checksum matches, so an interrupted
+setup resumes rather than leaving a half-model that looks complete. Archives
+are deleted after extraction; re-fetching is one command and half a gigabyte
+of cache nobody knows about is not.
+
+Everything is then located by *searching* the extracted tree rather than by
+hard-coded filenames, because upstream renames files between releases and a
+setup that breaks on a rename is a setup that breaks. The paths are written
+into your config, so you can see exactly what is being used and change it.
+
+`--setup --config-only` prepares directories and configuration without
+downloading anything, for a machine that points at a model server instead.
+
+### The voice
+
+Kokoro identifies speakers by index. 7 is `bf_emma` — the warm, unhurried
+British voice — and it is the default. `tts.voice.id` accepts the index or
+the name:
+
+```toml
+[tts.voice]
+id = "bf_isabella"   # or "8", or "bf_emma", or "7"
+```
+
+`rate` works; `pitch` does not, because Kokoro has no pitch control and a knob
+that does nothing is worse than no knob. `GET /v1/state` says so.
+
+### Why a subprocess
+
+The models run in sherpa-onnx's own command-line tools rather than through its
+C API. Linking would mean this crate could not build without the shared
+libraries present and `cargo test` would need a 600 MB download; a process per
+utterance costs tens of milliseconds against a model that takes hundreds. That
+is a bad trade only when transcribing continuously, which a voice assistant
+does not — it transcribes one utterance, after you stop speaking.
+
 ## Why there is no model in the binary
 
 The best speech runtimes are C++ (whisper.cpp, sherpa-onnx) or Python

@@ -25,12 +25,14 @@ use crate::util::BoxFuture;
 
 #[cfg(feature = "http-providers")]
 pub mod http;
+pub mod local;
 pub mod mock;
 pub mod sidecar;
 pub mod system;
 
 #[cfg(feature = "http-providers")]
 pub use http::HttpSynthesizer;
+pub use local::LocalSynthesizer;
 pub use mock::MockSynthesizer;
 pub use sidecar::SidecarSynthesizer;
 pub use system::SystemSynthesizer;
@@ -205,6 +207,7 @@ pub type SharedSynthesizer = Arc<dyn SpeechSynthesizer>;
 /// Build the synthesiser described by configuration.
 pub fn build(cfg: &TtsConfig) -> Result<SharedSynthesizer> {
     match cfg.provider {
+        TtsProviderKind::Local => Ok(Arc::new(LocalSynthesizer::from_config(cfg)?)),
         TtsProviderKind::Mock => Ok(Arc::new(MockSynthesizer::from_config(cfg))),
         TtsProviderKind::System => Ok(Arc::new(SystemSynthesizer::from_config(cfg))),
         TtsProviderKind::Sidecar => Ok(Arc::new(SidecarSynthesizer::from_config(cfg)?)),

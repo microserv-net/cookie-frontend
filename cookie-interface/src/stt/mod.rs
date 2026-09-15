@@ -29,11 +29,13 @@ use crate::util::BoxFuture;
 
 #[cfg(feature = "http-providers")]
 pub mod http;
+pub mod local;
 pub mod mock;
 pub mod sidecar;
 
 #[cfg(feature = "http-providers")]
 pub use http::HttpRecognizer;
+pub use local::LocalRecognizer;
 pub use mock::MockRecognizer;
 pub use sidecar::SidecarRecognizer;
 
@@ -195,6 +197,7 @@ pub type SharedRecognizer = Arc<dyn SpeechRecognizer>;
 /// Build the recognizer described by configuration.
 pub fn build(cfg: &SttConfig) -> Result<SharedRecognizer> {
     match cfg.provider {
+        SttProviderKind::Local => Ok(Arc::new(LocalRecognizer::from_config(cfg)?)),
         SttProviderKind::Mock => Ok(Arc::new(MockRecognizer::from_config(cfg))),
         SttProviderKind::Sidecar => Ok(Arc::new(SidecarRecognizer::from_config(cfg)?)),
         #[cfg(feature = "http-providers")]

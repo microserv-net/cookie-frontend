@@ -345,6 +345,9 @@ impl Default for VadConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SttProviderKind {
+    /// Whisper running on this machine through sherpa-onnx, fetched by
+    /// `--setup`. What you want unless you have a model server already.
+    Local,
     /// Deterministic in-process fake. No audio leaves the machine, no model
     /// needed; used by tests and by `--test` when nothing else is configured.
     Mock,
@@ -403,6 +406,9 @@ impl Default for SttConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TtsProviderKind {
+    /// Kokoro running on this machine through sherpa-onnx, fetched by
+    /// `--setup`. The British female voice the project is built around.
+    Local,
     /// Deterministic synthetic tone-speech. Not a voice; it exists so the
     /// pipeline, the API and the orb can be exercised with no model at all.
     Mock,

@@ -85,11 +85,25 @@ fn real_main(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    let config = Arc::new(config);
+    let mut config = Arc::new(config);
 
     if cli.setup {
+        let depth = if cli.config_only {
+            setup::Depth::ConfigOnly
+        } else {
+            setup::Depth::Models
+        };
         println!("Setting up cookie-interface…");
-        let report = runtime.block_on(setup::run(&config, &paths))?;
+        if depth == setup::Depth::Models {
+            if let Some(platform) = setup::Platform::detect() {
+                println!(
+                    "  about {:.0} MB to download, once, into {}",
+                    setup::total_bytes(platform) as f64 / 1_000_000.0,
+                    paths.models_dir().display()
+                );
+            }
+        }
+        let report = runtime.block_on(setup::run(&config, &paths, depth))?;
         for line in report.to_lines(&paths) {
             println!("{line}");
         }
@@ -97,6 +111,10 @@ fn real_main(cli: Cli) -> Result<()> {
         if !cli.test {
             return Ok(());
         }
+        // `--setup --test` continues into the live check, and it must use the
+        // configuration that was just written rather than the one loaded
+        // before anything was downloaded.
+        config = Arc::new(Config::load(&paths)?);
     }
 
     if cli.doctor {

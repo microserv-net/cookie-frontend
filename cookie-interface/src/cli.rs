@@ -36,10 +36,16 @@ pub struct Cli {
     #[arg(long)]
     pub test: bool,
 
-    /// Prepare directories, write a default configuration, and verify that
-    /// the configured models can actually be reached.
+    /// Fetch the speech runtime and models, and write a configuration that
+    /// uses them. About 700 MB, once. Without this Cookie falls back to the
+    /// operating system's voice and does not transcribe at all.
     #[arg(long)]
     pub setup: bool,
+
+    /// With `--setup`: prepare directories and configuration but download
+    /// nothing. For machines that point at a model server instead.
+    #[arg(long, requires = "setup")]
+    pub config_only: bool,
 
     /// Report on every capability and exit. The same checks Cookie runs when
     /// you ask her whether she is alright.

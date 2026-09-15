@@ -33,9 +33,18 @@ cargo run --release -- --port 8787       # somewhere else
 cargo run --release -- --no-ui           # headless
 ```
 
-Nothing is downloaded during `cargo build`. The default build speaks with your
-operating system's own voice and works immediately; point it at a real model
-when you want one.
+Nothing is downloaded during `cargo build`. The binary works immediately using
+your operating system's voice — but it cannot transcribe until you fetch a
+recogniser:
+
+```bash
+cargo run --release -- --setup           # ~700 MB, once
+```
+
+That fetches a prebuilt sherpa-onnx, `whisper-large-v3-turbo` for hearing, and
+Kokoro for the voice, then writes a configuration that uses them. The default
+voice is `bf_emma`: British, female, unhurried. See
+[docs/models.md](docs/models.md).
 
 ### Linux needs ALSA headers
 
