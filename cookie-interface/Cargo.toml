@@ -93,6 +93,10 @@ tokio = { version = "1", features = [
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
+# A WebSocket *client*, to talk to the speech runtime's own server so the
+# model stays resident between utterances instead of being loaded again for
+# every sentence.
+tokio-tungstenite = "0.29"
 hound = "3"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"

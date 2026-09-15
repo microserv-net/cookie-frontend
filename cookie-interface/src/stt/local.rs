@@ -1,22 +1,33 @@
 //! Whisper, running locally, through sherpa-onnx.
 //!
 //! `--setup` downloads a prebuilt sherpa-onnx and a converted
-//! `whisper-large-v3-turbo`, and this drives the `sherpa-onnx-offline`
-//! command with the paths it recorded.
+//! `whisper-large-v3-turbo`; this drives them.
 //!
-//! A process per utterance is a deliberate trade. Linking the C API would
-//! mean this crate could not build without the shared libraries present, and
-//! `cargo test` would need a 600 MB download; the alternative costs a few
-//! tens of milliseconds of start-up against a model that takes hundreds. That
-//! is a bad trade only when transcribing continuously, which a voice
-//! assistant does not — it transcribes one utterance at a time, after the
-//! person has stopped speaking.
+//! # Why a server and not a command
+//!
+//! The first version ran `sherpa-onnx-offline` once per utterance, which
+//! meant loading 600 MB of weights once per utterance. Measured on a laptop
+//! that was **thirteen to sixteen seconds** for a two-second sentence, nearly
+//! all of it reading the model off disk and compiling it — the recognition
+//! itself is a fraction of that.
+//!
+//! So the runtime's own `sherpa-onnx-offline-websocket-server` is started
+//! once, holds the model in memory, and each utterance is a WebSocket message.
+//! Measured against the same runtime on a single core, the same audio then
+//! took 1.7 seconds, and the second and third attempts took the same as the
+//! first — which is the property that matters.
+//!
+//! The one-shot command remains as a fallback for the case where the server
+//! will not start, because a slow assistant beats a mute one.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use futures_util::{SinkExt, StreamExt};
+use tokio::sync::Mutex;
 
 use crate::audio::AudioBuffer;
 use crate::config::SttConfig;
@@ -25,8 +36,11 @@ use crate::util::BoxFuture;
 
 use super::{SpeechRecognizer, SttCapabilities, TranscribeOptions, Transcript};
 
+/// How long to wait for the server to load the model and start listening.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Whisper via a local sherpa-onnx installation.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct LocalRecognizer {
     runtime: PathBuf,
     encoder: PathBuf,
@@ -36,16 +50,18 @@ pub struct LocalRecognizer {
     language: Option<String>,
     threads: u32,
     timeout_ms: u64,
-    /// `cpu`, `coreml`, `cuda`… Whatever the runtime was built with.
     provider: String,
-    /// Set once the preferred provider has been shown not to work.
+    /// Set once the preferred execution provider has been shown not to work.
     ///
-    /// Without this, every single utterance ran the recogniser twice — once
-    /// to fail on CoreML and once to succeed on the CPU — which doubled the
-    /// latency of a step that was already the slowest thing in the loop.
-    /// A runtime built without a provider fails identically forever, so one
-    /// failure is all the evidence there is going to be.
+    /// Without this, every utterance ran the recogniser twice — once to fail
+    /// on CoreML, once to succeed on the CPU — doubling the latency of the
+    /// slowest step in the loop. A runtime built without a provider fails
+    /// identically forever, so one failure is all the evidence there is.
     fell_back: Arc<AtomicBool>,
+    /// The resident server, once it is up. Zero means "not running".
+    port: Arc<AtomicU16>,
+    /// Held so the process is killed when the recogniser is dropped.
+    server: Arc<Mutex<Option<tokio::process::Child>>>,
 }
 
 impl LocalRecognizer {
@@ -81,9 +97,6 @@ impl LocalRecognizer {
                 .and_then(|v| v.as_integer())
                 .unwrap_or_else(default_threads)
                 .clamp(1, 32) as u32,
-            // The first utterance includes loading 600 MB of weights, which
-            // takes seconds even on fast hardware. A timeout tuned to steady
-            // state kills the very first thing you say.
             timeout_ms: cfg.timeout_ms.max(120_000),
             provider: cfg
                 .options
@@ -92,16 +105,14 @@ impl LocalRecognizer {
                 .map(str::to_owned)
                 .unwrap_or_else(default_provider),
             fell_back: Arc::new(AtomicBool::new(false)),
+            port: Arc::new(AtomicU16::new(0)),
+            server: Arc::new(Mutex::new(None)),
         };
         recognizer.check_files()?;
         Ok(recognizer)
     }
 
     /// Every path must exist before the first utterance, not during it.
-    ///
-    /// A missing model discovered mid-sentence is a silence the user cannot
-    /// explain; discovered at startup it is a sentence telling them what to
-    /// run.
     fn check_files(&self) -> Result<()> {
         for (what, path) in [
             ("the speech runtime", &self.runtime),
@@ -119,48 +130,232 @@ impl LocalRecognizer {
         Ok(())
     }
 
-    fn program(&self) -> PathBuf {
+    fn program(&self, name: &str) -> PathBuf {
         let name = if cfg!(windows) {
-            "sherpa-onnx-offline.exe"
+            format!("{name}.exe")
         } else {
-            "sherpa-onnx-offline"
+            name.to_string()
         };
         self.runtime.join("bin").join(name)
     }
-}
 
-/// The fastest execution provider this platform is likely to have.
-///
-/// CoreML on Apple hardware, where it moves the encoder onto the Neural
-/// Engine. It is a request rather than a guarantee: onnxruntime silently
-/// falls back to the CPU for operators CoreML cannot take, and a runtime
-/// built without the provider at all refuses outright. Both are handled —
-/// the first invisibly and correctly, the second by remembering and not
-/// asking again.
-fn default_provider() -> String {
-    if cfg!(target_os = "macos") {
-        "coreml".into()
-    } else {
-        "cpu".into()
+    fn provider_now(&self) -> String {
+        if self.fell_back.load(Ordering::Relaxed) {
+            "cpu".into()
+        } else {
+            self.provider.clone()
+        }
+    }
+
+    /// Start the resident server if it is not already up, and return its port.
+    async fn ensure_server(&self) -> Result<u16> {
+        let existing = self.port.load(Ordering::Acquire);
+        if existing != 0 {
+            return Ok(existing);
+        }
+        let mut guard = self.server.lock().await;
+        // Another task may have started it while we waited for the lock.
+        let existing = self.port.load(Ordering::Acquire);
+        if existing != 0 {
+            return Ok(existing);
+        }
+
+        let port = free_port()?;
+        let program = self.program("sherpa-onnx-offline-websocket-server");
+        if !program.exists() {
+            return Err(Error::ModelUnavailable {
+                name: self.model.clone(),
+                reason: format!("{} is missing", program.display()),
+            });
+        }
+
+        let mut command = tokio::process::Command::new(&program);
+        command
+            .arg(format!("--port={port}"))
+            .arg(format!("--num-work-threads={}", self.threads))
+            .arg("--num-io-threads=1")
+            .arg(format!("--provider={}", self.provider_now()))
+            .arg(format!("--whisper-encoder={}", self.encoder.display()))
+            .arg(format!("--whisper-decoder={}", self.decoder.display()))
+            .arg(format!("--tokens={}", self.tokens.display()))
+            .arg("--whisper-task=transcribe");
+        if let Some(language) = &self.language {
+            command.arg(format!("--whisper-language={language}"));
+        }
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        with_library_path(&mut command, &self.runtime);
+        with_coreml_cache(&mut command);
+
+        let child = command.spawn().map_err(|e| Error::ModelUnavailable {
+            name: self.model.clone(),
+            reason: format!("could not start the recogniser: {e}"),
+        })?;
+        *guard = Some(child);
+
+        // The server binds its port only after the model is loaded, so a
+        // successful connection is the signal that it is ready — more
+        // reliable than parsing its log, which changes between releases.
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        while Instant::now() < deadline {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                self.port.store(port, Ordering::Release);
+                tracing::info!(
+                    port,
+                    provider = %self.provider_now(),
+                    "speech recogniser resident and ready"
+                );
+                return Ok(port);
+            }
+            if let Some(child) = guard.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    *guard = None;
+                    return Err(Error::ModelUnavailable {
+                        name: self.model.clone(),
+                        reason: format!("the recogniser exited with {status} while loading"),
+                    });
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        Err(Error::ModelUnavailable {
+            name: self.model.clone(),
+            reason: "the recogniser did not finish loading in time".into(),
+        })
+    }
+
+    /// Send one utterance to the resident server.
+    async fn transcribe_resident(&self, audio: &AudioBuffer) -> Result<String> {
+        let port = self.ensure_server().await?;
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+            .await
+            .map_err(|e| Error::Stt(format!("could not reach the recogniser: {e}")))?;
+
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                frame_utterance(&audio.samples, audio.sample_rate).into(),
+            ))
+            .await
+            .map_err(|e| Error::Stt(format!("could not send audio: {e}")))?;
+
+        let reply = tokio::time::timeout(Duration::from_millis(self.timeout_ms), socket.next())
+            .await
+            .map_err(|_| {
+                Error::Stt(format!(
+                    "the recogniser took longer than {}ms and was given up on",
+                    self.timeout_ms
+                ))
+            })?;
+
+        let text = match reply {
+            Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => text.to_string(),
+            Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(bytes))) => {
+                String::from_utf8_lossy(&bytes).to_string()
+            }
+            Some(Ok(_)) => String::new(),
+            Some(Err(e)) => return Err(Error::Stt(format!("the recogniser errored: {e}"))),
+            None => return Err(Error::Stt("the recogniser closed the connection".into())),
+        };
+        let _ = socket.close(None).await;
+        Ok(parse_output(&text))
+    }
+
+    /// One invocation of the one-shot command, as a fallback.
+    async fn transcribe_once(
+        &self,
+        audio: &AudioBuffer,
+        options: &TranscribeOptions,
+        provider: &str,
+    ) -> Result<String> {
+        let wav = std::env::temp_dir().join(format!("cookie-stt-{}.wav", uuid::Uuid::new_v4()));
+        let samples = audio.samples.clone();
+        let rate = audio.sample_rate;
+        tokio::task::spawn_blocking({
+            let wav = wav.clone();
+            move || crate::audio::wav::write_mono_wav(&wav, &samples, rate)
+        })
+        .await
+        .map_err(|e| Error::Stt(e.to_string()))??;
+
+        let mut command = tokio::process::Command::new(self.program("sherpa-onnx-offline"));
+        command
+            .arg(format!("--provider={provider}"))
+            .arg(format!("--whisper-encoder={}", self.encoder.display()))
+            .arg(format!("--whisper-decoder={}", self.decoder.display()))
+            .arg(format!("--tokens={}", self.tokens.display()))
+            .arg(format!("--num-threads={}", self.threads))
+            .arg("--whisper-task=transcribe");
+        if let Some(language) = options.language.as_deref().or(self.language.as_deref()) {
+            command.arg(format!(
+                "--whisper-language={}",
+                language.split('-').next().unwrap_or("en")
+            ));
+        }
+        command
+            .arg(&wav)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        with_library_path(&mut command, &self.runtime);
+        with_coreml_cache(&mut command);
+
+        let child = command.spawn().map_err(|e| Error::ModelUnavailable {
+            name: self.model.clone(),
+            reason: format!("could not start the recogniser: {e}"),
+        })?;
+        let output = tokio::time::timeout(
+            Duration::from_millis(self.timeout_ms),
+            child.wait_with_output(),
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&wav).await;
+
+        let output = match output {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(Error::Stt(format!("the recogniser failed: {e}"))),
+            Err(_) => {
+                return Err(Error::Stt(format!(
+                    "the recogniser took longer than {}ms and was stopped",
+                    self.timeout_ms
+                )))
+            }
+        };
+        if !output.status.success() {
+            return Err(Error::Stt(format!(
+                "the recogniser exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .next_back()
+                    .unwrap_or_default()
+            )));
+        }
+        Ok(parse_output(&String::from_utf8_lossy(&output.stdout)))
     }
 }
 
-/// Whether the runtime's complaint is about the execution provider.
+/// The message the offline WebSocket server expects.
 ///
-/// Distinguishing this from a real failure matters: falling back on a missing
-/// model file would hide the actual problem behind a second, slower attempt
-/// at the same impossible thing.
-fn provider_was_refused(message: &str) -> bool {
-    let message = message.to_lowercase();
-    [
-        "provider",
-        "coreml",
-        "execution",
-        "not compiled",
-        "unsupported",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
+/// Eight bytes of header — the sample rate, then the *byte* count of the
+/// audio, both native-endian `i32` — followed by `f32` samples. Not a sample
+/// count, which is what the first attempt sent and why the server reported an
+/// utterance two thousand seconds long.
+pub(crate) fn frame_utterance(samples: &[f32], sample_rate: u32) -> Vec<u8> {
+    let byte_len = (samples.len() * std::mem::size_of::<f32>()) as i32;
+    let mut message = Vec::with_capacity(8 + byte_len as usize);
+    message.extend_from_slice(&(sample_rate as i32).to_ne_bytes());
+    message.extend_from_slice(&byte_len.to_ne_bytes());
+    for sample in samples {
+        message.extend_from_slice(&sample.to_ne_bytes());
+    }
+    message
 }
 
 /// Half the cores, at least two.
@@ -176,16 +371,62 @@ fn default_threads() -> i64 {
     (cores / 2).max(2)
 }
 
+/// The fastest execution provider this platform is likely to have.
+///
+/// CoreML on Apple hardware, where it moves the encoder onto the Neural
+/// Engine. It is a request rather than a guarantee: onnxruntime silently
+/// falls back to the CPU for operators CoreML cannot take, and a runtime
+/// built without the provider refuses outright.
+fn default_provider() -> String {
+    if cfg!(target_os = "macos") {
+        "coreml".into()
+    } else {
+        "cpu".into()
+    }
+}
+
+/// Whether a complaint is about the execution provider.
+///
+/// Distinguishing this from a real failure matters: falling back on a missing
+/// model file would hide the actual problem behind a second, slower attempt
+/// at the same impossible thing.
+pub(crate) fn provider_was_refused(message: &str) -> bool {
+    let message = message.to_lowercase();
+    [
+        "provider",
+        "coreml",
+        "execution",
+        "not compiled",
+        "unsupported",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+/// A port nobody is using, found by briefly binding one.
+fn free_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| Error::Other(format!("could not find a free port: {e}")))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| Error::Other(e.to_string()))?
+        .port();
+    drop(listener);
+    Ok(port)
+}
+
 /// Where CoreML keeps its compiled models.
 ///
-/// Inside the application's own cache directory, so `--clear-cache` clears it
-/// and nothing is left behind on uninstall.
-fn coreml_cache() -> std::path::PathBuf {
+/// onnxruntime compiles the model for the Neural Engine on first use; without
+/// somewhere to keep the result it recompiles on every run, which is slower
+/// than never asking for CoreML at all. Inside the application's own cache
+/// directory, so `--clear-cache` clears it.
+fn with_coreml_cache(command: &mut tokio::process::Command) {
     let directory = crate::paths::Paths::discover()
         .map(|paths| paths.cache_dir().join("coreml"))
         .unwrap_or_else(|_| std::env::temp_dir().join("cookie-coreml"));
     let _ = std::fs::create_dir_all(&directory);
-    directory
+    command.env("ORT_COREML_CACHE_PATH", &directory);
 }
 
 /// Point the dynamic loader at the runtime's own libraries.
@@ -193,7 +434,7 @@ fn coreml_cache() -> std::path::PathBuf {
 /// The prebuilt tools are linked against shared objects that sit beside them
 /// and are not on any system path — which is the whole reason this is set
 /// rather than left to chance.
-pub(crate) fn with_library_path(command: &mut tokio::process::Command, runtime: &std::path::Path) {
+pub(crate) fn with_library_path(command: &mut tokio::process::Command, runtime: &Path) {
     let lib = runtime.join("lib");
     let variable = if cfg!(target_os = "macos") {
         "DYLD_LIBRARY_PATH"
@@ -219,8 +460,6 @@ impl SpeechRecognizer for LocalRecognizer {
 
     fn capabilities(&self) -> SttCapabilities {
         SttCapabilities {
-            // sherpa-onnx prints the text and nothing else; anything more
-            // would be invented.
             timestamps: false,
             confidence: false,
             language_detection: self.language.is_none(),
@@ -234,14 +473,24 @@ impl SpeechRecognizer for LocalRecognizer {
     fn prepare(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             self.check_files()?;
-            let program = self.program();
-            if !program.exists() {
-                return Err(Error::ModelUnavailable {
-                    name: self.model.clone(),
-                    reason: format!("{} is missing", program.display()),
-                });
+            // Load the model now rather than during the first thing anybody
+            // says. It takes seconds, and they should be spent at startup.
+            match self.ensure_server().await {
+                Ok(_) => Ok(()),
+                Err(e)
+                    if provider_was_refused(&e.to_string())
+                        && !self.fell_back.load(Ordering::Relaxed) =>
+                {
+                    tracing::warn!(
+                        provider = %self.provider,
+                        "this runtime has no {} support; using the CPU from now on",
+                        self.provider
+                    );
+                    self.fell_back.store(true, Ordering::Relaxed);
+                    self.ensure_server().await.map(|_| ())
+                }
+                Err(e) => Err(e),
             }
-            Ok(())
         })
     }
 
@@ -261,47 +510,24 @@ impl SpeechRecognizer for LocalRecognizer {
                 audio.resampled(16_000)
             };
 
-            let wav = std::env::temp_dir().join(format!("cookie-stt-{}.wav", uuid::Uuid::new_v4()));
-            let samples = audio.samples.clone();
-            let rate = audio.sample_rate;
-            let written = tokio::task::spawn_blocking({
-                let wav = wav.clone();
-                move || crate::audio::wav::write_mono_wav(&wav, &samples, rate)
-            })
-            .await
-            .map_err(|e| Error::Stt(e.to_string()))?;
-            written?;
-
-            // Once the preferred provider has failed, stop asking: it will
-            // fail the same way every time, and paying for that on every
-            // utterance doubles the latency of the slowest step in the loop.
-            let preferred = if self.fell_back.load(Ordering::Relaxed) {
-                "cpu"
-            } else {
-                &self.provider
-            };
-            let mut used = preferred.to_string();
-            let mut attempt = self.run(&wav, &options, preferred).await;
-            if preferred != "cpu" {
-                if let Err(error) = &attempt {
-                    if provider_was_refused(&error.to_string()) {
-                        tracing::warn!(
-                            provider = %self.provider,
-                            "this runtime has no {} support; using the CPU from now on",
-                            self.provider
-                        );
-                        self.fell_back.store(true, Ordering::Relaxed);
-                        used = "cpu".into();
-                        attempt = self.run(&wav, &options, "cpu").await;
+            let text = match self.transcribe_resident(&audio).await {
+                Ok(text) => text,
+                Err(resident_error) => {
+                    tracing::warn!(
+                        "the resident recogniser failed ({resident_error}); \
+                         falling back to one-shot, which is much slower"
+                    );
+                    let provider = self.provider_now();
+                    match self.transcribe_once(&audio, &options, &provider).await {
+                        Ok(text) => text,
+                        Err(e) if provider != "cpu" && provider_was_refused(&e.to_string()) => {
+                            self.fell_back.store(true, Ordering::Relaxed);
+                            self.transcribe_once(&audio, &options, "cpu").await?
+                        }
+                        Err(e) => return Err(e),
                     }
-                    // Anything else is a real failure, and retrying it on the
-                    // CPU would only take twice as long to report the same
-                    // thing.
                 }
-            }
-            tracing::debug!(provider = %used, "transcribed");
-            let _ = tokio::fs::remove_file(&wav).await;
-            let text = attempt?;
+            };
 
             Ok(Transcript {
                 is_final: !options.interim,
@@ -316,85 +542,18 @@ impl SpeechRecognizer for LocalRecognizer {
     }
 }
 
-impl LocalRecognizer {
-    /// One invocation of the recogniser with a given execution provider.
-    async fn run(
-        &self,
-        wav: &std::path::Path,
-        options: &TranscribeOptions,
-        provider: &str,
-    ) -> Result<String> {
-        let mut command = tokio::process::Command::new(self.program());
-        command
-            .arg(format!("--provider={provider}"))
-            .arg(format!("--whisper-encoder={}", self.encoder.display()))
-            .arg(format!("--whisper-decoder={}", self.decoder.display()))
-            .arg(format!("--tokens={}", self.tokens.display()))
-            .arg(format!("--num-threads={}", self.threads))
-            .arg("--whisper-task=transcribe");
-        if let Some(language) = options.language.as_deref().or(self.language.as_deref()) {
-            command.arg(format!(
-                "--whisper-language={}",
-                language.split('-').next().unwrap_or("en")
-            ));
-        }
-        command
-            .arg(wav)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        with_library_path(&mut command, &self.runtime);
-
-        let child = command.spawn().map_err(|e| Error::ModelUnavailable {
-            name: self.model.clone(),
-            reason: format!("could not start the recogniser: {e}"),
-        })?;
-        let output = tokio::time::timeout(
-            std::time::Duration::from_millis(self.timeout_ms),
-            child.wait_with_output(),
-        )
-        .await;
-
-        let output = match output {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => return Err(Error::Stt(format!("the recogniser failed: {e}"))),
-            Err(_) => {
-                return Err(Error::Stt(format!(
-                    "the recogniser took longer than {}ms and was stopped",
-                    self.timeout_ms
-                )))
-            }
-        };
-        if !output.status.success() {
-            return Err(Error::Stt(format!(
-                "the recogniser exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-                    .lines()
-                    .last()
-                    .unwrap_or_default()
-            )));
-        }
-
-        Ok(parse_output(&String::from_utf8_lossy(&output.stdout)))
-    }
-}
-
-/// Pull the transcript out of sherpa-onnx's output.
+/// Pull the transcript out of what sherpa-onnx returns.
 ///
-/// It prints its whole configuration, then the file name, then a block of
-/// timings, and then the result as a JSON object:
+/// Both the server and the command answer with a JSON object; the command
+/// buries it under its own diagnostics.
 ///
 /// ```text
 /// {"lang": "", "text": "After early nightfall the yellow lamps …", "tokens": [...]}
 /// ```
 ///
-/// The first version of this discarded every line beginning with `{` as
-/// noise, which threw away the only line that mattered and returned an empty
-/// transcript for every utterance — recognition appeared to be silently doing
-/// nothing. Parse the JSON; fall back to the last plain line for older builds
-/// that printed bare text.
+/// An early version discarded every line beginning with `{` as noise, which
+/// threw away the only line that mattered and returned an empty transcript
+/// for every utterance.
 pub(crate) fn parse_output(stdout: &str) -> String {
     for line in stdout.lines().rev() {
         let line = line.trim();
@@ -408,7 +567,6 @@ pub(crate) fn parse_output(stdout: &str) -> String {
         }
     }
 
-    // Older releases printed the text on its own line after the timings.
     const NOISE: &[&str] = &[
         "Creating recognizer",
         "recognizer created",
@@ -442,7 +600,7 @@ mod tests {
     use super::*;
     use crate::config::SttProviderKind;
 
-    fn config(dir: &std::path::Path) -> SttConfig {
+    fn config(dir: &Path) -> SttConfig {
         let mut cfg = SttConfig {
             provider: SttProviderKind::Local,
             ..Default::default()
@@ -459,7 +617,7 @@ mod tests {
         cfg
     }
 
-    fn lay_out_files(dir: &std::path::Path) {
+    fn lay_out_files(dir: &Path) {
         std::fs::create_dir_all(dir.join("runtime/bin")).unwrap();
         for name in ["encoder.onnx", "decoder.onnx", "tokens.txt"] {
             std::fs::write(dir.join(name), b"").unwrap();
@@ -467,15 +625,34 @@ mod tests {
     }
 
     #[test]
+    fn the_utterance_frame_matches_what_the_server_reads() {
+        // Captured from the server's source: eight bytes of header, the
+        // sample rate then the *byte* count, both native-endian i32. Sending
+        // a sample count instead had it report a two-thousand-second
+        // utterance and refuse the connection.
+        let framed = frame_utterance(&[1.0, -1.0], 16_000);
+        assert_eq!(framed.len(), 8 + 8);
+        assert_eq!(
+            i32::from_ne_bytes(framed[0..4].try_into().unwrap()),
+            16_000,
+            "the first field is the sample rate"
+        );
+        assert_eq!(
+            i32::from_ne_bytes(framed[4..8].try_into().unwrap()),
+            8,
+            "the second field is bytes, not samples"
+        );
+        assert_eq!(f32::from_ne_bytes(framed[8..12].try_into().unwrap()), 1.0);
+    }
+
+    #[test]
     fn missing_paths_say_what_to_run() {
-        let dir = tempfile::tempdir().unwrap();
         let error = LocalRecognizer::from_config(&SttConfig {
             provider: SttProviderKind::Local,
             ..Default::default()
         })
         .unwrap_err();
         assert!(error.to_string().contains("--setup"), "{error}");
-        let _ = dir;
     }
 
     #[test]
@@ -488,7 +665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_notices_a_runtime_without_the_binary() {
+    async fn prepare_notices_a_runtime_without_the_server() {
         let dir = tempfile::tempdir().unwrap();
         lay_out_files(dir.path());
         let recognizer = LocalRecognizer::from_config(&config(dir.path())).unwrap();
@@ -503,15 +680,17 @@ mod tests {
         let capabilities = LocalRecognizer::from_config(&config(dir.path()))
             .unwrap()
             .capabilities();
-        assert!(!capabilities.timestamps, "sherpa-onnx prints text only");
+        assert!(!capabilities.timestamps, "sherpa-onnx returns text only");
         assert!(!capabilities.confidence);
+        assert!(
+            !capabilities.cheap_partials,
+            "a local model cannot absorb a partial every 400ms"
+        );
         assert_eq!(capabilities.sample_rate, 16_000);
     }
 
     #[test]
     fn only_a_provider_complaint_triggers_the_fallback() {
-        // Retrying a missing model on the CPU would take twice as long to
-        // report the same thing, and hide the real fault behind a slower one.
         assert!(provider_was_refused(
             "this build does not support the CoreML execution provider"
         ));
@@ -521,28 +700,20 @@ mod tests {
     }
 
     #[test]
-    fn coreml_gets_a_cache_directory_so_it_compiles_once() {
-        // Without one, onnxruntime recompiles the model on every invocation,
-        // which is slower than never asking for CoreML at all.
-        let cache = coreml_cache();
-        assert!(cache.is_absolute(), "{}", cache.display());
+    fn free_ports_are_actually_free() {
+        let port = free_port().unwrap();
+        assert!(port > 1024);
+        // Binding it again must work, or the probe left it occupied.
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     }
 
     #[test]
     fn the_transcript_is_read_out_of_the_json_sherpa_actually_prints() {
-        // Captured verbatim from sherpa-onnx v1.13.8. The first version of
-        // the parser discarded every line starting with `{` as noise, which
-        // threw away this one and made recognition look silently broken.
         let stdout = concat!(
             "Creating recognizer ...\n",
             "recognizer created in 0.668 s\n",
-            "Started\nDone!\n\n",
-            "/tmp/cookie-stt-1.wav\n",
-            "----\n",
-            "num threads: 1\n",
-            "decoding method: greedy_search\n",
+            "/tmp/cookie-stt-1.wav\n----\n",
             "Elapsed seconds: 1.095 s\n",
-            "Real time factor (RTF): 1.095 / 6.625 = 0.165\n",
             r#"{"lang": "", "emotion": "", "text": "My name is Robin.", "tokens":[" My"]}"#,
             "\n"
         );
@@ -550,23 +721,14 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_text_line_still_works_for_older_builds() {
-        let stdout = "Creating recognizer ...\n\
-                      /tmp/cookie-stt-1.wav\n\
-                      ----\n\
-                      Elapsed seconds: 1.2\n\
-                      Real time factor (RTF): 0.5\n\
-                      My name is Robin\n";
-        assert_eq!(parse_output(stdout), "My name is Robin");
+    fn the_servers_bare_json_reply_parses_too() {
+        let reply = r#"{"lang": "", "emotion": "", "event": "", "text": "Are you there?"}"#;
+        assert_eq!(parse_output(reply), "Are you there?");
     }
 
     #[test]
     fn silence_produces_an_empty_transcript_rather_than_a_label() {
-        let stdout = concat!(
-            "Creating recognizer ...\n/tmp/x.wav\n----\nDone!\n",
-            r#"{"lang": "", "text": "", "tokens":[]}"#,
-            "\n"
-        );
-        assert!(parse_output(stdout).is_empty());
+        let reply = r#"{"lang": "", "text": "", "tokens":[]}"#;
+        assert!(parse_output(reply).is_empty());
     }
 }

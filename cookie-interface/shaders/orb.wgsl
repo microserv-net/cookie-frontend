@@ -168,7 +168,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Roughly three and a half points of *radius* in a 28-point window, so
     // about seven across — a bead beside the pointer. The window stays much
     // larger than that because the glow has to reach nothing before the edge.
-    let radius = orb.a.y * 0.25;
+    // Five points across in a 28-point window — the size that was right
+    // before I shrank it twice more on a misread. The window stays much
+    // larger so the glow reaches nothing before the edge; there is no rim
+    // light, so no ring.
+    let radius = orb.a.y * 0.18;
     let distortion = orb.e.x;
     let energy = orb.f.x;
     let onset = orb.g.x;

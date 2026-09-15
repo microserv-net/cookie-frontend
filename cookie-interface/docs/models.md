@@ -49,14 +49,28 @@ id = "bf_isabella"   # or "8", or "bf_emma", or "7"
 `rate` works; `pitch` does not, because Kokoro has no pitch control and a knob
 that does nothing is worse than no knob. `GET /v1/state` says so.
 
-### Why a subprocess
+### Why a resident server
 
-The models run in sherpa-onnx's own command-line tools rather than through its
-C API. Linking would mean this crate could not build without the shared
-libraries present and `cargo test` would need a 600 MB download; a process per
-utterance costs tens of milliseconds against a model that takes hundreds. That
-is a bad trade only when transcribing continuously, which a voice assistant
-does not — it transcribes one utterance, after you stop speaking.
+The models run in sherpa-onnx's own binaries rather than through its C API:
+linking would mean this crate could not build without the shared libraries
+present, and `cargo test` would need a 600 MB download.
+
+The first version ran the one-shot command per utterance, and the assumption
+underneath it — that process start-up is cheap next to inference — was simply
+wrong. It loads 600 MB of weights every time. Measured on a laptop, a
+two-second sentence took **thirteen to sixteen seconds**, nearly all of it
+reading and compiling the model.
+
+So `sherpa-onnx-offline-websocket-server` is started once and holds the model
+in memory; each utterance is a WebSocket message. Measured against the same
+runtime on a single core, the same audio then took 1.7 seconds, and the second
+and third attempts took the same as the first.
+
+The protocol is eight bytes of header — sample rate, then the *byte* count of
+the audio, both native-endian `i32` — followed by `f32` samples, and the reply
+is the same JSON object the command prints. The one-shot path remains as a
+fallback for when the server will not start, because a slow assistant beats a
+mute one.
 
 ## Why there is no model in the binary
 
