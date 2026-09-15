@@ -22,7 +22,12 @@ path = "src/main.rs"
 # The default build gives you: the orb renderer, the local HTTP API,
 # cpal audio I/O, the built-in VAD, the sidecar + HTTP model providers and
 # the OS speech synthesiser. No model download is needed to *build*.
-default = ["ui", "audio-io", "http-providers"]
+# TLS is in the default set because `--setup` downloads models over https and
+# a build that cannot do that cannot finish setting itself up. It was opt-in
+# on the theory that it dragged in a C toolchain; rustls with webpki-roots
+# builds on a bare container with nothing but a C compiler, so the theory was
+# wrong and the cost of being wrong was a first run that could not work.
+default = ["ui", "audio-io", "http-providers", "tls"]
 
 # Procedural orb renderer (wgpu + winit). Disable for headless/server builds
 # and for CI: `cargo test --no-default-features --features audio-io`.

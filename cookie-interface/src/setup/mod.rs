@@ -269,9 +269,25 @@ async fn fetch(asset: &Asset, target: &Path) -> Result<bool> {
         let part = target.with_extension("part");
         println!("  downloading {} ({})", asset.name, asset.human_size());
 
-        let response = reqwest::get(asset.url)
-            .await
-            .map_err(|e| Error::Network(format!("could not start the download: {e}")))?;
+        let response = reqwest::get(asset.url).await.map_err(|e| {
+            // Every asset is served over https, so a build without TLS fails
+            // here and nowhere else — and "error sending request" gives no
+            // hint at all about why.
+            if asset.url.starts_with("https://") && !cfg!(feature = "tls") {
+                Error::Config(
+                    "this build has no TLS, so it cannot download anything over https. \
+                     Rebuild with `cargo build --release` (TLS is on by default), or \
+                     unpack the models yourself — see docs/models.md."
+                        .into(),
+                )
+            } else {
+                Error::Network(format!(
+                    "could not reach {}: {e}. Check the network and try again; \
+                     --setup resumes rather than starting over.",
+                    asset.url
+                ))
+            }
+        })?;
         if !response.status().is_success() {
             return Err(Error::Network(format!(
                 "the server answered {} for {}",

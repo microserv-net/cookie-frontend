@@ -26,6 +26,15 @@ into your config, so you can see exactly what is being used and change it.
 `--setup --config-only` prepares directories and configuration without
 downloading anything, for a machine that points at a model server instead.
 
+### If you built without TLS
+
+`--no-default-features` drops TLS, and every asset is served over https, so
+setup cannot fetch anything. It says so rather than failing with a bare
+transport error. Either rebuild with the defaults, or download the three
+archives listed above by hand and unpack them into the models directory that
+`--paths` prints — the file search means they only have to *be* there, not be
+named anything in particular.
+
 ### The voice
 
 Kokoro identifies speakers by index. 7 is `bf_emma` — the warm, unhurried
