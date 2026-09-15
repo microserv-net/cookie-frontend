@@ -348,7 +348,7 @@ impl LocalRecognizer {
 /// count, which is what the first attempt sent and why the server reported an
 /// utterance two thousand seconds long.
 pub(crate) fn frame_utterance(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-    let byte_len = (samples.len() * std::mem::size_of::<f32>()) as i32;
+    let byte_len = std::mem::size_of_val(samples) as i32;
     let mut message = Vec::with_capacity(8 + byte_len as usize);
     message.extend_from_slice(&(sample_rate as i32).to_ne_bytes());
     message.extend_from_slice(&byte_len.to_ne_bytes());
