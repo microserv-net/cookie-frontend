@@ -423,7 +423,10 @@ mod tests {
     async fn a_command_that_will_not_finish_is_stopped() {
         let host = ToolHost::new(PermissionPolicy::default());
         let (program, arguments) = if cfg!(windows) {
-            ("cmd", json!(["/C", "timeout /t 30"]))
+            // Not `timeout`: it refuses to run when stdin is not a console,
+            // which is exactly how we spawn it, so it exits immediately and
+            // the test measures nothing.
+            ("cmd", json!(["/C", "ping -n 31 127.0.0.1"]))
         } else {
             ("sleep", json!(["30"]))
         };

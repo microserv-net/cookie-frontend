@@ -796,8 +796,6 @@ impl VisibilityConfig {
 pub struct WakeConfig {
     /// Require the name before acting on anything.
     ///
-    /// On by default. An assistant that acts on whatever it overhears is not
-    /// an assistant you leave running.
     /// Off for now. The wake word depends on recognising one short word
     /// reliably in a room, and until recognition itself is comfortably fast
     /// and accurate it gates everything behind its worst case — which is what

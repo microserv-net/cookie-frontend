@@ -276,7 +276,11 @@ fn is_protected(path: &Path) -> bool {
     if canonical.parent().is_none() {
         return true; // a filesystem root
     }
+    // Both sides canonicalised: on Windows the home directory arrives as
+    // `C:\Users\you` and canonicalising it produces `\\?\C:\Users\you`, so
+    // comparing one form against the other silently protects nothing.
     if let Some(home) = super::home_dir() {
+        let home = home.canonicalize().unwrap_or(home);
         if canonical == home {
             return true;
         }

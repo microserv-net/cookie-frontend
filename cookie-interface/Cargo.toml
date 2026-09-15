@@ -46,6 +46,11 @@ http-providers = ["dep:reqwest"]
 # Qwen3-TTS, hosted Whisper) can be reached. Costs a C toolchain at build
 # time, which is why it is opt-in. See docs/installation.md.
 tls = ["http-providers", "reqwest?/rustls", "reqwest?/webpki-roots"]
+# Keep Linux secrets in GNOME Keyring or KWallet rather than the kernel
+# keyring, so they survive a reboot. Needs libdbus-1-dev at build time, which
+# is why it is not the default: an unexpected system package is exactly the
+# prerequisite that turns "cargo build" into an afternoon.
+linux-secret-service = ["keyring/sync-secret-service"]
 
 [dependencies]
 anyhow = "1"
@@ -55,6 +60,23 @@ serde_json = "1"
 toml = "0.9"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
+# The platform's own credential store: Keychain, Secret Service, Credential
+# Manager. Secrets must not live in a configuration file, and rolling our own
+# encryption would mean inventing a key-management story the operating system
+# already has.
+# Version 3 rather than 4: 4 folded the platform backends behind a plugin
+# arrangement whose feature names do not exist yet on crates.io, and a
+# credential store is the last place to be clever about versions.
+# Keychain on macOS, Credential Manager on Windows, and the kernel keyring on
+# Linux. Not Secret Service: it needs libdbus headers at build time, and a
+# system package nobody expected is exactly the kind of prerequisite that
+# turns "cargo build" into an afternoon. GNOME Keyring or KWallet instead is
+# one feature flag away — see `secret-service`.
+keyring = { version = "3", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "linux-native",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tokio = { version = "1", features = [

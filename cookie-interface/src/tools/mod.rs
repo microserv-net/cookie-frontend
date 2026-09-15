@@ -22,6 +22,7 @@
 //! reports what happened.
 
 mod filesystem;
+mod git;
 pub mod permission;
 mod shell;
 mod system;
@@ -182,6 +183,9 @@ impl ToolHost {
             host.register(tool);
         }
         for tool in system::tools() {
+            host.register(tool);
+        }
+        for tool in git::tools() {
             host.register(tool);
         }
         host
@@ -385,6 +389,10 @@ mod tests {
             "shell.run",
             "app.open",
             "browser.open",
+            "git.status",
+            "git.diff",
+            "git.commit",
+            "git.push",
         ] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }

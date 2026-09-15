@@ -101,6 +101,22 @@ pitch    = 0.0        # semitones
 
 Check `/v1/state` for what your provider actually honours.
 
+## Secrets
+
+Not configuration: secrets live in the platform's own credential store —
+Keychain on macOS, Credential Manager on Windows, the kernel keyring on Linux
+— and never in this file.
+
+The backend refers to them symbolically, as `secret://github/personal-token`,
+and the value is substituted on this machine at the moment a tool needs it. A
+model cannot leak what it was never given, and no transcript or event stream
+ever carries one.
+
+On Linux the kernel keyring is used by default because it needs no system
+package; it does not survive a reboot. Build with `--features
+linux-secret-service` for GNOME Keyring or KWallet instead, which does, and
+which needs `libdbus-1-dev`.
+
 ## `[retention]`
 
 ```toml

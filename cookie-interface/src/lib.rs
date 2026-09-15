@@ -30,6 +30,7 @@ pub mod paths;
 #[cfg(feature = "ui")]
 pub mod renderer;
 pub mod retention;
+pub mod secrets;
 pub mod setup;
 pub mod sidecar;
 pub mod state;
