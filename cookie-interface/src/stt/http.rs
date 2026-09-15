@@ -96,6 +96,7 @@ impl SpeechRecognizer for HttpRecognizer {
             language_detection: true,
             prompt: true,
             native_partials: false,
+            cheap_partials: true,
             sample_rate: 16_000,
         }
     }

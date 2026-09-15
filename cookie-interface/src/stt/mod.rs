@@ -139,6 +139,16 @@ pub struct SttCapabilities {
     /// Provider consumes audio incrementally and emits its own partials.
     /// When `false` the engine synthesises partials by re-running the model.
     pub native_partials: bool,
+    /// Whether re-running the model mid-utterance is cheap enough to do
+    /// several times a second.
+    ///
+    /// This is not a preference, it is a fact about the provider, and getting
+    /// it wrong is expensive: a local Whisper asked for a partial every 400ms
+    /// starts a new 600 MB model run before the last has finished, saturates
+    /// the machine, starves the audio callback, and then times out — which is
+    /// exactly what happened. A model server can absorb it; a subprocess on
+    /// the same laptop cannot.
+    pub cheap_partials: bool,
     /// Sample rate the provider wants, in Hz.
     pub sample_rate: u32,
 }
@@ -151,6 +161,7 @@ impl Default for SttCapabilities {
             language_detection: false,
             prompt: false,
             native_partials: false,
+            cheap_partials: false,
             sample_rate: 16_000,
         }
     }
@@ -248,6 +259,28 @@ mod tests {
         }
         .interim();
         assert!(o.interim && !o.want_timestamps);
+    }
+
+    #[test]
+    fn only_providers_that_can_afford_partials_advertise_them() {
+        // The regression this encodes: a local Whisper asked for a partial
+        // every 400ms starts a new model run before the last has finished,
+        // saturates the machine, starves the audio callback into underruns,
+        // and times out. The engine reads this flag to decide.
+        let cfg = SttConfig::default();
+        assert!(
+            MockRecognizer::from_config(&cfg)
+                .capabilities()
+                .cheap_partials
+        );
+
+        let mut sidecar_cfg = cfg.clone();
+        sidecar_cfg.sidecar_command = vec!["true".into()];
+        let sidecar = SidecarRecognizer::from_config(&sidecar_cfg).unwrap();
+        assert!(
+            !sidecar.capabilities().cheap_partials,
+            "a subprocess on this machine cannot absorb a partial every 400ms"
+        );
     }
 
     #[test]

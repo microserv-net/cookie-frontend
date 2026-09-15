@@ -572,13 +572,16 @@ impl Default for UiConfig {
             always_on_top: true,
             transparent: true,
             click_through: true,
-            // The orb lives beside the pointer, so it is measured against the
-            // pointer: a little smaller than the arrow, not a panel. The
-            // window is larger than the orb because the glow needs room.
-            width: 72,
-            height: 72,
+            // Measured against the pointer, because that is what it sits
+            // beside: the orb itself is about twenty points across, a little
+            // smaller than the arrow. The window is wider than the orb
+            // because the glow needs somewhere to fall off.
+            width: 44,
+            height: 44,
             dock_corner: DockCorner::BottomRight,
-            cursor_offset: [16.0, 14.0],
+            // Just off the tip of the arrow. Far enough not to obscure what
+            // is under the pointer, close enough to read as attached to it.
+            cursor_offset: [18.0, 12.0],
             visibility: VisibilityConfig::default(),
             cursor_follow_lag: 0.0,
             target_fps: 60,

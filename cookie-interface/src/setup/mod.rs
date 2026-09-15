@@ -148,6 +148,10 @@ pub async fn run(config: &Config, paths: &Paths, depth: Depth) -> Result<SetupRe
         (Some(runtime), Some(whisper)) => {
             updated.stt.provider = SttProviderKind::Local;
             updated.stt.model = "whisper-large-v3-turbo".into();
+            // Interim transcripts mean re-running the model mid-sentence,
+            // which on a local Whisper costs more than the partial is worth.
+            updated.stt.partials = false;
+            updated.stt.timeout_ms = 120_000;
             updated.stt.options.insert(
                 "runtime".into(),
                 toml::Value::String(runtime.display().to_string()),
@@ -174,6 +178,7 @@ pub async fn run(config: &Config, paths: &Paths, depth: Depth) -> Result<SetupRe
         (Some(runtime), Some(kokoro)) => {
             updated.tts.provider = TtsProviderKind::Local;
             updated.tts.model = "kokoro".into();
+            updated.tts.timeout_ms = 60_000;
             updated.tts.voice.id = assets::BRITISH_FEMALE_VOICE.to_string();
             updated.tts.options.insert(
                 "runtime".into(),

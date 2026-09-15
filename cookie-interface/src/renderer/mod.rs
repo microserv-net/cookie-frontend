@@ -205,12 +205,20 @@ impl OrbApp {
     /// always right.
     fn pointer(&self) -> Option<LogicalPosition<f64>> {
         use mouse_position::mouse_position::Mouse;
-        match Mouse::get_mouse_position() {
-            Mouse::Position { x, y } => Some(LogicalPosition::new(
-                x as f64 / self.scale_factor,
-                y as f64 / self.scale_factor,
-            )),
-            Mouse::Error => None,
+        let Mouse::Position { x, y } = Mouse::get_mouse_position() else {
+            return None;
+        };
+        // macOS reports the pointer in points, which are already logical —
+        // dividing by the scale factor there put the orb at half the
+        // coordinates, which is why it floated up and to the left of the
+        // pointer on a Retina display and drifted further the further right
+        // you went. Windows and X11 report device pixels.
+        if cfg!(target_os = "macos") {
+            Some(LogicalPosition::new(x as f64, y as f64))
+        } else {
+            Some(
+                winit::dpi::PhysicalPosition::new(x as f64, y as f64).to_logical(self.scale_factor),
+            )
         }
     }
 

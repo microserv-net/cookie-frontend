@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::audio::{
@@ -388,6 +388,13 @@ struct Worker {
     frame: Vec<f32>,
     scratch: Vec<f32>,
     backend: Option<Arc<crate::backend::BackendClient>>,
+    /// One recognition at a time.
+    ///
+    /// Whisper on this machine is a whole CPU for a second or two. Letting a
+    /// second run start before the first finishes does not make anything
+    /// faster — it makes both slower, starves the audio callback into
+    /// underruns, and pushes each run past its own timeout.
+    stt_permit: Arc<Semaphore>,
     tasks: Arc<TaskRegistry>,
     status: Arc<Mutex<LiveStatus>>,
     intents: IntentEngine,
@@ -439,6 +446,7 @@ impl Worker {
             frame: Vec::with_capacity(config.audio.frame_samples()),
             scratch: Vec::with_capacity(config.audio.frame_samples() * 4),
             backend,
+            stt_permit: Arc::new(Semaphore::new(1)),
             tasks,
             status,
             intents: IntentEngine::default(),
@@ -673,6 +681,18 @@ impl Worker {
         if !self.config.stt.partials || !self.vad.is_speaking() {
             return;
         }
+        // A provider that has to re-run a local model to produce a partial is
+        // not asked to. The interim text is a nicety; the final transcript is
+        // the point, and racing them costs the thing that matters.
+        if !self.recognizer.capabilities().cheap_partials {
+            return;
+        }
+        // And even a cheap one waits its turn: if a recognition is already
+        // running, this partial would only be queued behind it and arrive
+        // after the final it was meant to precede.
+        if self.stt_permit.available_permits() == 0 {
+            return;
+        }
         let interval = Duration::from_millis(self.config.stt.partial_interval_ms.max(150) as u64);
         if self.last_partial.elapsed() < interval || self.utterance.len() < 4_000 {
             return;
@@ -693,11 +713,25 @@ impl Worker {
     ) {
         let recognizer = self.recognizer.clone();
         let tx = self.internal_tx.clone();
+        let permit = self.stt_permit.clone();
         let mut options = TranscribeOptions::from_config(&self.config.stt);
         if interim {
             options = options.interim();
         }
         tokio::spawn(async move {
+            // Interim passes give up rather than queue; a final one waits,
+            // because losing it would lose the utterance.
+            let _guard = if interim {
+                match permit.clone().try_acquire_owned() {
+                    Ok(guard) => guard,
+                    Err(_) => return,
+                }
+            } else {
+                match permit.acquire_owned().await {
+                    Ok(guard) => guard,
+                    Err(_) => return,
+                }
+            };
             let result = recognizer.transcribe(audio, options).await;
             let _ = tx
                 .send(Internal::Transcript {

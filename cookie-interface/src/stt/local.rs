@@ -67,9 +67,12 @@ impl LocalRecognizer {
                 .options
                 .get("threads")
                 .and_then(|v| v.as_integer())
-                .unwrap_or(4)
+                .unwrap_or_else(default_threads)
                 .clamp(1, 32) as u32,
-            timeout_ms: cfg.timeout_ms.max(5_000),
+            // The first utterance includes loading 600 MB of weights, which
+            // takes seconds even on fast hardware. A timeout tuned to steady
+            // state kills the very first thing you say.
+            timeout_ms: cfg.timeout_ms.max(120_000),
         };
         recognizer.check_files()?;
         Ok(recognizer)
@@ -105,6 +108,19 @@ impl LocalRecognizer {
         };
         self.runtime.join("bin").join(name)
     }
+}
+
+/// Half the cores, at least two.
+///
+/// All of them would win a benchmark and lose the application: the audio
+/// callback needs a core to stay ahead of the microphone, and a recogniser
+/// that starves it produces underruns, which sound worse than a transcript
+/// arriving a moment later.
+fn default_threads() -> i64 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get() as i64)
+        .unwrap_or(4);
+    (cores / 2).max(2)
 }
 
 /// Point the dynamic loader at the runtime's own libraries.
@@ -145,6 +161,7 @@ impl SpeechRecognizer for LocalRecognizer {
             language_detection: self.language.is_none(),
             prompt: false,
             native_partials: false,
+            cheap_partials: false,
             sample_rate: 16_000,
         }
     }

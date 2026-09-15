@@ -63,6 +63,7 @@ impl SpeechRecognizer for SidecarRecognizer {
             language_detection: true,
             prompt: true,
             native_partials: false,
+            cheap_partials: false,
             sample_rate: 16_000,
         }
     }

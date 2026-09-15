@@ -100,6 +100,7 @@ impl SpeechRecognizer for MockRecognizer {
         SttCapabilities {
             confidence: true,
             native_partials: false,
+            cheap_partials: true,
             ..Default::default()
         }
     }
