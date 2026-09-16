@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failed build should not also cost us five minutes of debug info.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # Formatting and lints are cheap and fail fast, so they run alone and first.
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cookie-interface
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cookie-interface
+      - name: ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --no-default-features --features audio-io,http-providers -- -D warnings
+      # The default set is what people actually build, and it now includes
+      # TLS — which nothing checked until a first run could not download its
+      # own models.
+      - run: cargo clippy --all-targets -- -D warnings
+
+  # The real test matrix. `ui` is deliberately excluded: there is no GPU on a
+  # runner, and a headless build proves the feature boundary actually holds.
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: cookie-interface
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cookie-interface
+      - name: ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Test
+        # No microphone, no speaker, no GPU, no model — that is the point.
+        run: cargo test --no-default-features --features audio-io,http-providers,tls
+
+  # The renderer gets a compile check on every platform. It cannot be run
+  # without a display, and pretending otherwise would be worse than not
+  # checking it at all.
+  renderer:
+    name: renderer builds (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: cookie-interface
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cookie-interface
+      - name: Linux GUI and audio headers
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev \
+            libwayland-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - run: cargo check --all-targets --features ui,audio-io,http-providers
+
+  # Documentation drifts silently; broken intra-doc links are the early sign.
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cookie-interface
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cookie-interface
+      - name: ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cargo doc --no-deps --no-default-features --features audio-io,http-providers
+        env:
+          RUSTDOCFLAGS: -D warnings

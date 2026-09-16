@@ -1,0 +1,145 @@
+[package]
+name = "cookie-interface"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Voice interface front-end for the Cookie assistant: microphone, VAD, STT, TTS, a local streaming HTTP API and an audio-reactive procedural orb."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://example.invalid/cookie-interface"
+keywords = ["voice", "tts", "stt", "audio", "wgpu"]
+categories = ["multimedia::audio", "gui"]
+
+[lib]
+name = "cookie_interface"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cookie-interface"
+path = "src/main.rs"
+
+[features]
+# The default build gives you: the orb renderer, the local HTTP API,
+# cpal audio I/O, the built-in VAD, the sidecar + HTTP model providers and
+# the OS speech synthesiser. No model download is needed to *build*.
+# TLS is in the default set because `--setup` downloads models over https and
+# a build that cannot do that cannot finish setting itself up. It was opt-in
+# on the theory that it dragged in a C toolchain; rustls with webpki-roots
+# builds on a bare container with nothing but a C compiler, so the theory was
+# wrong and the cost of being wrong was a first run that could not work.
+default = ["ui", "audio-io", "http-providers", "tls"]
+
+# Procedural orb renderer (wgpu + winit). Disable for headless/server builds
+# and for CI: `cargo test --no-default-features --features audio-io`.
+ui = ["dep:mouse_position", "dep:wgpu", "dep:winit", "dep:pollster", "dep:bytemuck", "dep:raw-window-handle"]
+
+# Real microphone / speaker I/O through cpal. Without it the engine still
+# runs against the in-process mock devices (used by the test-suite).
+audio-io = ["dep:cpal"]
+
+# Network model providers (OpenAI-compatible STT, Qwen3-TTS / Kokoro HTTP)
+# and the first-run model downloader. Plain HTTP only, which is all a
+# localhost model server needs and keeps the build free of a TLS stack.
+http-providers = ["dep:reqwest"]
+
+# Adds rustls to the HTTP providers so `https://` endpoints (hosted
+# Qwen3-TTS, hosted Whisper) can be reached. Costs a C toolchain at build
+# time, which is why it is opt-in. See docs/installation.md.
+tls = ["http-providers", "reqwest?/rustls", "reqwest?/webpki-roots"]
+# Keep Linux secrets in GNOME Keyring or KWallet rather than the kernel
+# keyring, so they survive a reboot. Needs libdbus-1-dev at build time, which
+# is why it is not the default: an unexpected system package is exactly the
+# prerequisite that turns "cargo build" into an afternoon.
+linux-secret-service = ["keyring/sync-secret-service"]
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+# The platform's own credential store: Keychain, Secret Service, Credential
+# Manager. Secrets must not live in a configuration file, and rolling our own
+# encryption would mean inventing a key-management story the operating system
+# already has.
+# Version 3 rather than 4: 4 folded the platform backends behind a plugin
+# arrangement whose feature names do not exist yet on crates.io, and a
+# credential store is the last place to be clever about versions.
+# Keychain on macOS, Credential Manager on Windows, and the kernel keyring on
+# Linux. Not Secret Service: it needs libdbus headers at build time, and a
+# system package nobody expected is exactly the kind of prerequisite that
+# turns "cargo build" into an afternoon. GNOME Keyring or KWallet instead is
+# one feature flag away — see `secret-service`.
+keyring = { version = "3", default-features = false, features = [
+    "apple-native",
+    "windows-native",
+    "linux-native",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+    "process",
+    "signal",
+    "net",
+] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+# A WebSocket *client*, to talk to the speech runtime's own server so the
+# model stays resident between utterances instead of being loaded again for
+# every sentence.
+tokio-tungstenite = "0.29"
+hound = "3"
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
+base64 = "0.22"
+
+cpal = { version = "0.18", optional = true }
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "stream",
+    "http2",
+    "multipart",
+], optional = true }
+
+wgpu = { version = "30", optional = true }
+winit = { version = "0.30", optional = true }
+pollster = { version = "1", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+# The pointer's position in screen coordinates. winit only reports motion
+# relative to a window, and the cursor companion has to follow the pointer
+# across the whole desktop — including over other applications, where no
+# window of ours receives anything.
+mouse_position = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tempfile = "3"
+axum-test = "18"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# The renderer is unusably slow in a debug build; always optimise the
+# shader/maths heavy crates even in `cargo run`.
+[profile.dev.package."*"]
+opt-level = 2
+
+[[example]]
+name = "client"
+# The example talks HTTP to a running interface, so it cannot build in a
+# headless configuration. Declaring that here keeps `cargo clippy
+# --no-default-features --all-targets` honest instead of failing on it.
+required-features = ["http-providers"]

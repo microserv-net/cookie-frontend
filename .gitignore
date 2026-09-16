@@ -1,3 +1,5 @@
-/target
+# Anchoring this to the repo root was a mistake: cargo runs one directory
+# down, so /target matched nothing and build artifacts sailed straight in.
+target/
 **/*.rs.bk
 *.part
