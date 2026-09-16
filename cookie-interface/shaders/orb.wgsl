@@ -171,7 +171,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // The size from the screenshot that was approved: a 40-point window with
     // the body at this fraction of it. I shrank it twice more after that on
     // a misread of "5 points", and both times it became a pinprick.
-    let radius = orb.a.y * 0.34;
+    let radius = orb.a.y * 0.42;
     let distortion = orb.e.x;
     let energy = orb.f.x;
     let onset = orb.g.x;

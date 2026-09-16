@@ -48,6 +48,20 @@ pub use events::{Command, EventBus, VoiceEvent};
 pub use paths::Paths;
 pub use state::VoiceState;
 
+/// The `text` field of a sidecar reply, trimmed.
+///
+/// Small enough to live here rather than in either provider, and shared so
+/// that "the helper answered but with nothing usable" means the same thing on
+/// both sides.
+pub(crate) fn parsing_text(value: &serde_json::Value) -> String {
+    value
+        .get("text")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// Crate version, surfaced by `--version`, `/v1/health` and the `ready` event.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

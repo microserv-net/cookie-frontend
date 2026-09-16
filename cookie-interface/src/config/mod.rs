@@ -27,7 +27,7 @@ pub use voice::{Gender, VoicePatch, VoiceSpec};
 
 /// Bumped only for changes that need migration logic. Readers must tolerate a
 /// *higher* version by ignoring unknown fields (serde does this for us).
-pub const CONFIG_VERSION: u32 = 2;
+pub const CONFIG_VERSION: u32 = 3;
 
 /// Bring an older configuration file up to date.
 ///
@@ -67,6 +67,25 @@ pub fn migrate(config: &mut Config) -> Vec<String> {
         config.ui.width = defaults.width;
         config.ui.height = defaults.height;
         changes.push("the orb is the size of a cursor now".into());
+    }
+
+    // v2 → v3. On macOS the recogniser that ships with the machine replaced
+    // the downloaded one; an existing install should not be left on the slow
+    // path because it was set up a day earlier.
+    if cfg!(target_os = "macos") && config.stt.provider == SttProviderKind::Local {
+        let helper = crate::stt::apple::default_helper_path();
+        if helper.exists() {
+            config.stt.provider = SttProviderKind::Apple;
+            config.stt.model = "apple-on-device".into();
+            config.stt.partials = true;
+            config.stt.timeout_ms = 20_000;
+            config.stt.options.insert(
+                "helper".into(),
+                toml::Value::String(helper.display().to_string()),
+            );
+            changes
+                .push("recognition now uses the one built into macOS, which is far quicker".into());
+        }
     }
 
     config.version = CONFIG_VERSION;
@@ -416,8 +435,12 @@ impl Default for VadConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SttProviderKind {
+    /// Apple's on-device recogniser. macOS only, and the default there: it is
+    /// already installed, already local, and answers in a fraction of the
+    /// time Whisper takes on the same machine.
+    Apple,
     /// Whisper running on this machine through sherpa-onnx, fetched by
-    /// `--setup`. What you want unless you have a model server already.
+    /// `--setup`. The default everywhere else.
     Local,
     /// Deterministic in-process fake. No audio leaves the machine, no model
     /// needed; used by tests and by `--test` when nothing else is configured.

@@ -147,6 +147,39 @@ impl LocalRecognizer {
         }
     }
 
+    /// The weights to hand this execution provider.
+    ///
+    /// `--setup` prefers the int8 files, which is right for the CPU — a
+    /// quarter of the memory for a difference nobody hears. It is wrong for
+    /// CoreML: the Neural Engine has no path for those quantised operators,
+    /// so onnxruntime takes the graph back onto the CPU and the provider does
+    /// nothing at all. That is the likeliest reason a two-second sentence
+    /// still costs eleven seconds on hardware that should manage it in one.
+    ///
+    /// So when a non-CPU provider is in use and the float weights are sitting
+    /// next to the quantised ones — they are, in the same archive — those are
+    /// used instead.
+    fn weights_for(&self, provider: &str) -> (PathBuf, PathBuf) {
+        if provider == "cpu" {
+            return (self.encoder.clone(), self.decoder.clone());
+        }
+        let unquantised = |path: &Path| -> PathBuf {
+            let name = path.file_name().map(|n| n.to_string_lossy().to_string());
+            match name {
+                Some(name) if name.contains(".int8.") => {
+                    let candidate = path.with_file_name(name.replace(".int8.", "."));
+                    if candidate.exists() {
+                        candidate
+                    } else {
+                        path.to_path_buf()
+                    }
+                }
+                _ => path.to_path_buf(),
+            }
+        };
+        (unquantised(&self.encoder), unquantised(&self.decoder))
+    }
+
     /// Start the resident server if it is not already up, and return its port.
     async fn ensure_server(&self) -> Result<u16> {
         let existing = self.port.load(Ordering::Acquire);
@@ -169,14 +202,29 @@ impl LocalRecognizer {
             });
         }
 
+        let provider = self.provider_now();
+        let (encoder, decoder) = self.weights_for(&provider);
+        if encoder != self.encoder {
+            tracing::info!(
+                "using unquantised weights for {provider}: the Neural Engine \
+                 cannot take the int8 graph and would hand it back to the CPU"
+            );
+        }
         let mut command = tokio::process::Command::new(&program);
         command
             .arg(format!("--port={port}"))
-            .arg(format!("--num-work-threads={}", self.threads))
+            // Decode workers, which is how many utterances can be in flight;
+            // one is enough, and more of them compete with the threads that
+            // do the actual work.
+            .arg("--num-work-threads=1")
             .arg("--num-io-threads=1")
-            .arg(format!("--provider={}", self.provider_now()))
-            .arg(format!("--whisper-encoder={}", self.encoder.display()))
-            .arg(format!("--whisper-decoder={}", self.decoder.display()))
+            // Threads *inside* the model. The recogniser is the slowest thing
+            // in the loop and nothing else is running while it works, so it
+            // gets everything but the core the audio callback needs.
+            .arg(format!("--num-threads={}", model_threads()))
+            .arg(format!("--provider={provider}"))
+            .arg(format!("--whisper-encoder={}", encoder.display()))
+            .arg(format!("--whisper-decoder={}", decoder.display()))
             .arg(format!("--tokens={}", self.tokens.display()))
             .arg("--whisper-task=transcribe");
         if let Some(language) = &self.language {
@@ -306,13 +354,14 @@ impl LocalRecognizer {
         .await
         .map_err(|e| Error::Stt(e.to_string()))??;
 
+        let (encoder, decoder) = self.weights_for(provider);
         let mut command = tokio::process::Command::new(self.program("sherpa-onnx-offline"));
         command
             .arg(format!("--provider={provider}"))
-            .arg(format!("--whisper-encoder={}", self.encoder.display()))
-            .arg(format!("--whisper-decoder={}", self.decoder.display()))
+            .arg(format!("--whisper-encoder={}", encoder.display()))
+            .arg(format!("--whisper-decoder={}", decoder.display()))
             .arg(format!("--tokens={}", self.tokens.display()))
-            .arg(format!("--num-threads={}", self.threads))
+            .arg(format!("--num-threads={}", model_threads()))
             .arg("--whisper-task=transcribe");
         if let Some(language) = options.language.as_deref().or(self.language.as_deref()) {
             command.arg(format!(
@@ -382,16 +431,24 @@ pub(crate) fn frame_utterance(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 }
 
 /// Half the cores, at least two.
-///
-/// All of them would win a benchmark and lose the application: the audio
-/// callback needs a core to stay ahead of the microphone, and a recogniser
-/// that starves it produces underruns, which sound worse than a transcript
-/// arriving a moment later.
 fn default_threads() -> i64 {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get() as i64)
         .unwrap_or(4);
     (cores / 2).max(2)
+}
+
+/// Threads inside the model itself.
+///
+/// Everything but one core. The recogniser is the slowest step in the loop
+/// and nothing else of consequence runs while it works — but the audio
+/// callback still has to stay ahead of the microphone, and starving it
+/// produces the underruns that sound worse than a slightly later transcript.
+fn model_threads() -> i64 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get() as i64)
+        .unwrap_or(4);
+    (cores - 1).max(2)
 }
 
 /// The fastest execution provider this platform is likely to have.
@@ -720,6 +777,70 @@ mod tests {
         assert!(provider_was_refused("Unsupported provider: coreml"));
         assert!(!provider_was_refused("the recogniser's encoder is missing"));
         assert!(!provider_was_refused("No such file or directory"));
+    }
+
+    #[test]
+    fn coreml_gets_the_float_weights_and_the_cpu_keeps_the_quantised_ones() {
+        // The Neural Engine has no path for int8 operators, so handing it the
+        // quantised graph makes onnxruntime give the whole thing back to the
+        // CPU — the provider is accepted and then does nothing, which is the
+        // hardest kind of "working" to notice.
+        let dir = tempfile::tempdir().unwrap();
+        lay_out_files(dir.path());
+        for name in [
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "encoder.onnx",
+            "decoder.onnx",
+        ] {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        let mut cfg = config(dir.path());
+        for (key, file) in [
+            ("encoder", "encoder.int8.onnx"),
+            ("decoder", "decoder.int8.onnx"),
+        ] {
+            cfg.options.insert(
+                key.into(),
+                toml::Value::String(dir.path().join(file).display().to_string()),
+            );
+        }
+        let recognizer = LocalRecognizer::from_config(&cfg).unwrap();
+
+        let (cpu_encoder, _) = recognizer.weights_for("cpu");
+        assert!(cpu_encoder.to_string_lossy().contains("int8"));
+
+        let (coreml_encoder, coreml_decoder) = recognizer.weights_for("coreml");
+        assert!(
+            !coreml_encoder.to_string_lossy().contains("int8"),
+            "{coreml_encoder:?}"
+        );
+        assert!(!coreml_decoder.to_string_lossy().contains("int8"));
+    }
+
+    #[test]
+    fn without_float_weights_the_quantised_ones_are_used_anyway() {
+        // Better a provider that quietly falls back than a recogniser that
+        // cannot start because a file is missing.
+        let dir = tempfile::tempdir().unwrap();
+        // Deliberately *not* lay_out_files: this is the case where only the
+        // quantised weights were shipped.
+        std::fs::create_dir_all(dir.path().join("runtime/bin")).unwrap();
+        for name in ["encoder.int8.onnx", "decoder.int8.onnx", "tokens.txt"] {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        let mut cfg = config(dir.path());
+        cfg.options.insert(
+            "decoder".into(),
+            toml::Value::String(dir.path().join("decoder.int8.onnx").display().to_string()),
+        );
+        cfg.options.insert(
+            "encoder".into(),
+            toml::Value::String(dir.path().join("encoder.int8.onnx").display().to_string()),
+        );
+        let recognizer = LocalRecognizer::from_config(&cfg).unwrap();
+        let (encoder, _) = recognizer.weights_for("coreml");
+        assert!(encoder.to_string_lossy().contains("int8"));
     }
 
     #[test]

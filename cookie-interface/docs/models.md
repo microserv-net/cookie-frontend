@@ -1,5 +1,31 @@
 # Models
 
+## On macOS, recognition uses the machine's own recogniser
+
+`--setup` compiles a small Swift helper around `SFSpeechRecognizer` and uses
+it for speech recognition. It is on-device, it is already tuned for Apple
+hardware, and it answers in a fraction of the time Whisper takes on the same
+machine — measured at eleven seconds for a two-second sentence through
+onnxruntime, because Whisper pads every utterance to thirty seconds and the
+quantised graph cannot reach the Neural Engine.
+
+It also makes interim transcripts worth having: it is quick enough to re-run
+mid-sentence, so words appear while you are still speaking.
+
+Whisper is still downloaded and still configured. It is the fallback when
+speech permission is refused or a locale has no on-device model, and it is
+what every other platform uses. Switching back is one line:
+
+```toml
+[stt]
+provider = "local"      # or "apple"
+```
+
+The first run asks for permission to use speech recognition. If you refuse
+it, say so in `--doctor` terms: recognition will report as unavailable rather
+than failing silently. The voice is unaffected either way — Kokoro's British
+female stays.
+
 ## What `--setup` installs
 
 ```bash

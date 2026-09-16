@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.Cookie.cookie-speech</string>
+  <key>CFBundleName</key>
+  <string>Cookie Speech</string>
+  <!-- macOS refuses speech recognition to a binary with no stated reason,
+       and a command-line tool has no bundle to put it in — so the plist is
+       linked into the executable itself. Without this the authorisation
+       request is denied before the user ever sees a prompt. -->
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Cookie transcribes what you say so she can respond to it. Recognition happens on this Mac.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Cookie listens for your voice.</string>
+</dict>
+</plist>

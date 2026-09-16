@@ -136,6 +136,28 @@ pub async fn run(config: &Config, paths: &Paths, depth: Depth) -> Result<SetupRe
         fetch_and_extract(&asset, paths, &mut report).await?;
     }
 
+    // On macOS, the recogniser that ships with the machine beats the one we
+    // just downloaded, by a wide margin and on the machine's own hardware.
+    // Whisper is still fetched: it is the fallback when permission is refused
+    // or a locale has no on-device model, and it is what every other platform
+    // uses.
+    let apple = if cfg!(target_os = "macos") {
+        match build_speech_helper(paths) {
+            Ok(path) => {
+                println!("  built the Apple speech helper");
+                Some(path)
+            }
+            Err(e) => {
+                report
+                    .warnings
+                    .push(format!("could not build the Apple speech helper: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Everything is located by *searching* the extracted tree rather than by
     // hard-coded filenames. Upstream renames files between releases, and a
     // setup that breaks on a rename is a setup that breaks.
@@ -144,14 +166,34 @@ pub async fn run(config: &Config, paths: &Paths, depth: Depth) -> Result<SetupRe
     report.recogniser = assets::find_whisper(&models).map(|w| w.encoder.clone());
     report.voice = assets::find_kokoro(&models).map(|k| k.model.clone());
 
+    if let Some(helper) = &apple {
+        updated.stt.provider = SttProviderKind::Apple;
+        updated.stt.model = "apple-on-device".into();
+        // Partials are worth having with this one: it is quick enough to
+        // re-run mid-sentence, so words appear while you are still speaking.
+        updated.stt.partials = true;
+        updated.stt.timeout_ms = 20_000;
+        updated.stt.options.insert(
+            "helper".into(),
+            toml::Value::String(helper.display().to_string()),
+        );
+        report.recogniser = Some(helper.clone());
+    }
+
     match (&report.runtime, assets::find_whisper(&models)) {
         (Some(runtime), Some(whisper)) => {
-            updated.stt.provider = SttProviderKind::Local;
-            updated.stt.model = "whisper-large-v3-turbo".into();
-            // Interim transcripts mean re-running the model mid-sentence,
-            // which on a local Whisper costs more than the partial is worth.
-            updated.stt.partials = false;
-            updated.stt.timeout_ms = 120_000;
+            // Only if Apple's recogniser is not taking the job; the Whisper
+            // paths are recorded either way so switching back is a one-line
+            // change in the config rather than another download.
+            if apple.is_none() {
+                updated.stt.provider = SttProviderKind::Local;
+                updated.stt.model = "whisper-large-v3-turbo".into();
+                // Interim transcripts mean re-running the model mid-sentence,
+                // which on a local Whisper costs more than the partial is
+                // worth.
+                updated.stt.partials = false;
+                updated.stt.timeout_ms = 120_000;
+            }
             updated.stt.options.insert(
                 "runtime".into(),
                 toml::Value::String(runtime.display().to_string()),
@@ -346,6 +388,77 @@ async fn fetch(asset: &Asset, target: &Path) -> Result<bool> {
         std::fs::rename(&part, target).map_err(|e| Error::io(target, e))?;
         Ok(true)
     }
+}
+
+/// Compile the Apple speech helper.
+///
+/// Swift rather than Rust because `SFSpeechRecognizer` is an Objective-C API
+/// whose bindings would mean unsafe blocks in a crate that forbids them; the
+/// boundary is a pipe either way. `swiftc` ships with the Xcode command line
+/// tools, which anybody building this already has.
+///
+/// The Info.plist is *linked into the executable*, because macOS refuses
+/// speech recognition to a binary with no stated reason and a command-line
+/// tool has no bundle to put one in. Without it the authorisation request is
+/// denied before the user ever sees a prompt.
+#[cfg(target_os = "macos")]
+fn build_speech_helper(paths: &Paths) -> Result<PathBuf> {
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("native")
+        .join("CookieSpeech.swift");
+    let plist = source.with_file_name("Info.plist");
+    if !source.exists() {
+        return Err(Error::Other(format!(
+            "{} is missing from this checkout",
+            source.display()
+        )));
+    }
+    let target = crate::stt::apple::default_helper_path();
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+    }
+
+    let output = std::process::Command::new("swiftc")
+        .arg("-O")
+        .arg(&source)
+        .arg("-o")
+        .arg(&target)
+        .arg("-framework")
+        .arg("Speech")
+        .arg("-framework")
+        .arg("AVFoundation")
+        .args([
+            "-Xlinker",
+            "-sectcreate",
+            "-Xlinker",
+            "__TEXT",
+            "-Xlinker",
+            "__info_plist",
+            "-Xlinker",
+        ])
+        .arg(&plist)
+        .output()
+        .map_err(|e| {
+            Error::Other(format!(
+                "swiftc could not be run ({e}). Install the Xcode command line                  tools with `xcode-select --install`."
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(Error::Other(format!(
+            "swiftc failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .next_back()
+                .unwrap_or_default()
+        )));
+    }
+    let _ = paths;
+    Ok(target)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_speech_helper(_paths: &Paths) -> Result<PathBuf> {
+    Err(Error::Other("not macOS".into()))
 }
 
 /// Extract a `.tar.bz2` into `into`.

@@ -27,12 +27,14 @@ use crate::error::Result;
 use crate::events::TranscriptSegment;
 use crate::util::BoxFuture;
 
+pub mod apple;
 #[cfg(feature = "http-providers")]
 pub mod http;
 pub mod local;
 pub mod mock;
 pub mod sidecar;
 
+pub use apple::AppleRecognizer;
 #[cfg(feature = "http-providers")]
 pub use http::HttpRecognizer;
 pub use local::LocalRecognizer;
@@ -208,6 +210,7 @@ pub type SharedRecognizer = Arc<dyn SpeechRecognizer>;
 /// Build the recognizer described by configuration.
 pub fn build(cfg: &SttConfig) -> Result<SharedRecognizer> {
     match cfg.provider {
+        SttProviderKind::Apple => Ok(Arc::new(AppleRecognizer::from_config(cfg)?)),
         SttProviderKind::Local => Ok(Arc::new(LocalRecognizer::from_config(cfg)?)),
         SttProviderKind::Mock => Ok(Arc::new(MockRecognizer::from_config(cfg))),
         SttProviderKind::Sidecar => Ok(Arc::new(SidecarRecognizer::from_config(cfg)?)),
