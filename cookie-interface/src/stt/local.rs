@@ -48,6 +48,9 @@ pub struct LocalRecognizer {
     tokens: PathBuf,
     model: String,
     language: Option<String>,
+    /// Kept for the one-shot fallback's own thread count; the resident server
+    /// uses [`model_threads`] instead, which is everything but one core.
+    #[allow(dead_code)]
     threads: u32,
     timeout_ms: u64,
     provider: String,

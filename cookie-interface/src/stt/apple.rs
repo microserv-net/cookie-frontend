@@ -80,7 +80,7 @@ impl AppleRecognizer {
             locale,
             // Apple's recogniser answers in well under a second; anything
             // near this means something is wrong rather than slow.
-            timeout_ms: cfg.timeout_ms.min(20_000).max(5_000),
+            timeout_ms: cfg.timeout_ms.clamp(5_000, 20_000),
         })
     }
 
