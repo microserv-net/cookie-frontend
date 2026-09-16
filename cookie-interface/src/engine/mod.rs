@@ -189,6 +189,7 @@ impl Engine {
             ..Default::default()
         }));
 
+        let (ready_tx, ready_rx) = mpsc::channel::<bool>(1);
         let (tx, rx) = mpsc::channel(64);
         let worker = Worker::new(
             config.clone(),
@@ -203,6 +204,7 @@ impl Engine {
             tx.clone(),
             tasks.clone(),
             status.clone(),
+            ready_rx,
         )?;
         tokio::spawn(worker.run());
 
@@ -219,8 +221,12 @@ impl Engine {
                         detail: Some(e.to_string()),
                     });
                 }
+                // The recogniser first, and its readiness is what opens the
+                // microphone: see `Internal::RecogniserReady`.
+                let stt_ready = recognizer.prepare().await;
+                let _ = ready_tx.send(stt_ready.is_ok()).await;
                 for (kind, result, name) in [
-                    ("stt", recognizer.prepare().await, recognizer.name()),
+                    ("stt", stt_ready, recognizer.name()),
                     ("tts", synthesizer.prepare().await, synthesizer.name()),
                 ] {
                     {
@@ -341,6 +347,12 @@ pub(crate) enum Internal {
         interim: bool,
         result: Box<Result<Transcript>>,
         offset_ms: u64,
+        /// How long this sat behind another recognition before starting.
+        ///
+        /// Reported separately from the work itself, because "recognition
+        /// took twenty seconds" is a different problem when nineteen of them
+        /// were spent queueing behind the sentence before it.
+        waited_ms: u64,
     },
     SpeechFinished {
         utterance_id: String,
@@ -348,6 +360,15 @@ pub(crate) enum Internal {
         reason: &'static str,
     },
     Sweep(crate::retention::SweepReport),
+    /// The recogniser has finished loading.
+    ///
+    /// Listening before this point means the first thing anybody says is
+    /// queued behind a model load — which is exactly how a two-second
+    /// sentence came back twenty seconds later, with everything after it
+    /// stacked behind that.
+    RecogniserReady {
+        ok: bool,
+    },
 }
 
 struct SpeakingJob {
@@ -399,6 +420,8 @@ struct Worker {
     tasks: Arc<TaskRegistry>,
     status: Arc<Mutex<LiveStatus>>,
     intents: IntentEngine,
+    /// Resolves once the recogniser has loaded.
+    ready_rx: mpsc::Receiver<bool>,
     /// Whether anything heard is meant for Cookie. See [`crate::wake`].
     wake: WakeGate,
     last_sweep: Instant,
@@ -420,6 +443,7 @@ impl Worker {
         command_tx: mpsc::Sender<Command>,
         tasks: Arc<TaskRegistry>,
         status: Arc<Mutex<LiveStatus>>,
+        ready_rx: mpsc::Receiver<bool>,
     ) -> Result<Self> {
         let rate = config.audio.sample_rate;
         let playback = devices.output.open()?;
@@ -450,6 +474,7 @@ impl Worker {
             scratch: Vec::with_capacity(config.audio.frame_samples() * 4),
             backend,
             stt_permit: Arc::new(Semaphore::new(1)),
+            ready_rx,
             tasks,
             status,
             intents: IntentEngine::default(),
@@ -470,8 +495,10 @@ impl Worker {
             tts_provider: self.info.tts_provider.clone(),
             audio_available: self.info.hardware_audio,
         });
+        // Listening waits for the recogniser. Opening the microphone first
+        // only means collecting speech nothing can transcribe yet.
         if self.continuous {
-            self.start_listening("startup".into(), true);
+            tracing::info!("waiting for the recogniser before opening the microphone");
         }
 
         let frame_ms = self.config.audio.frame_ms.max(1) as u64;
@@ -482,6 +509,9 @@ impl Worker {
             tokio::select! {
                 biased;
                 Some(command) = self.commands.recv() => self.on_command(command).await,
+                Some(ok) = self.ready_rx.recv() => {
+                    self.on_internal(Internal::RecogniserReady { ok });
+                }
                 Some(message) = self.internal_rx.recv() => self.on_internal(message),
                 _ = ticker.tick() => self.on_tick(),
             }
@@ -729,6 +759,7 @@ impl Worker {
             options = options.interim();
         }
         tokio::spawn(async move {
+            let queued_at = std::time::Instant::now();
             // Interim passes give up rather than queue; a final one waits,
             // because losing it would lose the utterance.
             let _guard = if interim {
@@ -742,6 +773,7 @@ impl Worker {
                     Err(_) => return,
                 }
             };
+            let waited_ms = queued_at.elapsed().as_millis() as u64;
             let result = recognizer.transcribe(audio, options).await;
             let _ = tx
                 .send(Internal::Transcript {
@@ -749,6 +781,7 @@ impl Worker {
                     interim,
                     result: Box::new(result),
                     offset_ms,
+                    waited_ms,
                 })
                 .await;
         });
@@ -818,7 +851,8 @@ impl Worker {
                 interim,
                 result,
                 offset_ms,
-            } => self.on_transcript(utterance_id, interim, *result, offset_ms),
+                waited_ms,
+            } => self.on_transcript(utterance_id, interim, *result, offset_ms, waited_ms),
             Internal::SpeechFinished {
                 utterance_id,
                 duration_ms,
@@ -838,6 +872,22 @@ impl Worker {
                     reason: reason.to_string(),
                 });
             }
+            Internal::RecogniserReady { ok } => {
+                if self.continuous && self.capture.is_none() {
+                    if ok {
+                        self.start_listening("startup".into(), true);
+                    } else {
+                        // Still listen: speech is still detected, the orb
+                        // still responds, and --doctor explains why nothing
+                        // is transcribed. Silence with no explanation is
+                        // worse than a degraded assistant.
+                        tracing::warn!(
+                            "the recogniser did not load; listening anyway,                              but nothing will be transcribed"
+                        );
+                        self.start_listening("startup".into(), true);
+                    }
+                }
+            }
             Internal::Sweep(report) => {
                 if report.deleted > 0 || report.failed > 0 {
                     self.bus.emit(VoiceEvent::RetentionSwept {
@@ -856,6 +906,7 @@ impl Worker {
         interim: bool,
         result: Result<Transcript>,
         offset_ms: u64,
+        waited_ms: u64,
     ) {
         let transcript = match result {
             Ok(t) => t,
@@ -874,7 +925,11 @@ impl Worker {
             self.bus.emit(VoiceEvent::Timing {
                 what: "recognition".into(),
                 elapsed_ms: transcript.latency_ms,
-                detail: Some(self.info.stt_provider.clone()),
+                detail: Some(if waited_ms > 250 {
+                    format!("{}, after {waited_ms} ms queued", self.info.stt_provider)
+                } else {
+                    self.info.stt_provider.clone()
+                }),
             });
         }
         if transcript.is_empty() {

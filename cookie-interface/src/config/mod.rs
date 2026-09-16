@@ -647,19 +647,18 @@ impl Default for UiConfig {
             // beside: the orb itself is about twenty points across, a little
             // smaller than the arrow. The window is wider than the orb
             // because the glow needs somewhere to fall off.
-            // The body is about five points across — a bead, not a bubble.
-            // The window is much wider than that because the glow has to fade
-            // to nothing *inside* it: anything clipped at the window edge is
-            // clipped along a straight line, and that straight line is the
-            // boundary that keeps reappearing.
-            width: 28,
-            height: 28,
+            // Back to the size that was approved. The window is much wider
+            // than the body because the glow has to fade to nothing *inside*
+            // it: anything clipped at the window edge is clipped along a
+            // straight line, and a straight line is a visible boundary.
+            width: 40,
+            height: 40,
             dock_corner: DockCorner::BottomRight,
             // To the right of the arrow and level with it: the pointer's hot
             // spot is its top-left corner, so anything below reads as
             // detached, and anything to the left sits under the hand.
             // Measured from the window's centre to the pointer's hot spot.
-            cursor_offset: [14.0, 2.0],
+            cursor_offset: [18.0, 2.0],
             visibility: VisibilityConfig::default(),
             cursor_follow_lag: 0.0,
             target_fps: 60,

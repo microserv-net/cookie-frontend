@@ -168,11 +168,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Roughly three and a half points of *radius* in a 28-point window, so
     // about seven across — a bead beside the pointer. The window stays much
     // larger than that because the glow has to reach nothing before the edge.
-    // Five points across in a 28-point window — the size that was right
-    // before I shrank it twice more on a misread. The window stays much
-    // larger so the glow reaches nothing before the edge; there is no rim
-    // light, so no ring.
-    let radius = orb.a.y * 0.18;
+    // The size from the screenshot that was approved: a 40-point window with
+    // the body at this fraction of it. I shrank it twice more after that on
+    // a misread of "5 points", and both times it became a pinprick.
+    let radius = orb.a.y * 0.34;
     let distortion = orb.e.x;
     let energy = orb.f.x;
     let onset = orb.g.x;
@@ -230,19 +229,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // The glow decays exponentially and never reaches zero, so a
     // window-sized rectangle of alpha 0.01 would be a visible square on a
-    // dark desktop. Three attempts to remove it went wrong in three ways: a
-    // fixed radius puts an edge at that radius; smoothstepping the alpha puts
-    // an edge wherever it crosses the threshold; and cubing, which has no
-    // edge at all, took the glow with it — 0.3 became 0.027, so everything
-    // but the core vanished.
+    // dark desktop. Four attempts to remove it drew a ring instead, and the
+    // last one is the instructive failure: `max(alpha - 0.035, 0)` looks
+    // smooth, but it has a kink exactly where alpha crosses 0.035 — the
+    // derivative jumps from 1 to 0 — and the eye finds a discontinuity in the
+    // *slope* as readily as one in the value. That kink is a circle, and a
+    // circle around the orb is the ring that keeps being reported.
     //
-    // What works is a *linear* floor. Subtracting a constant has the same
-    // slope everywhere, so it cannot draw a contour, and it removes only the
-    // haze: 0.02 becomes nothing, 0.6 stays 0.59. The gaussian then takes the
-    // corners to zero over the whole window rather than at any particular
-    // radius.
-    alpha = max(alpha - 0.035, 0.0) / 0.965;
-    alpha = alpha * exp(-dist * dist * 1.8);
+    // A gaussian has no kink anywhere. Choosing its width so the value at the
+    // window edge is below one 255th means nothing is ever clipped and there
+    // is no threshold to leave a mark: exp(-7) is 0.0009, invisible, while
+    // the body at a fifth of the way out keeps exp(-0.28) = 0.76 of itself.
+    alpha = alpha * exp(-dist * dist * 7.0);
 
     // Keep a whisper of the background tint when the window is opaque.
     alpha = max(alpha, orb.g.w);

@@ -185,7 +185,10 @@ impl LocalRecognizer {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // Kept, not discarded: this is where onnxruntime says whether it
+            // actually took the execution provider it was handed, and
+            // throwing it away is why "is CoreML working?" had no answer.
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         with_library_path(&mut command, &self.runtime);
         with_coreml_cache(&mut command);
@@ -194,6 +197,26 @@ impl LocalRecognizer {
             name: self.model.clone(),
             reason: format!("could not start the recogniser: {e}"),
         })?;
+        let mut child = child;
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let lower = line.to_lowercase();
+                    // Anything about providers is worth surfacing at warn:
+                    // it decides whether this runs in two seconds or twenty.
+                    if lower.contains("coreml")
+                        || lower.contains("provider")
+                        || lower.contains("fallback")
+                    {
+                        tracing::warn!(target: "cookie::stt", "{line}");
+                    } else {
+                        tracing::debug!(target: "cookie::stt", "{line}");
+                    }
+                }
+            });
+        }
         *guard = Some(child);
 
         // The server binds its port only after the model is loaded, so a
